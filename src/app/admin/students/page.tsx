@@ -303,7 +303,9 @@ export default function StudentManagement() {
                                     <td style={{ padding: '12px 20px', fontSize: '0.8rem', fontWeight: 800 }}>{s.grade}</td>
                                     <td style={{ padding: '12px 20px' }}>
                                         <div style={{ fontSize: '0.75rem', color: '#1a1c1e', fontWeight: 800 }}>{s.student_id}</div>
-                                        <div style={{ fontSize: '0.7rem', color: '#666', fontWeight: 600 }}>PWD: {s.password || '---'}</div>
+                                        <div style={{ fontSize: '0.7rem', color: '#16a34a', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '3px' }}>
+                                            <span className="material-icons" style={{ fontSize: '12px' }}>lock</span> Portal Active
+                                        </div>
                                     </td>
                                     <td style={{ padding: '12px 20px' }}>
                                         <div style={{ fontWeight: 800, fontSize: '0.8rem' }}>{s.guardian_name}</div>

@@ -1,0 +1,6 @@
+{
+  "name": "Wisdom House Portal",
+  "description": "Comprehensive academic management portal for Wisdom House Education featuring administration, teacher portals, student dashboards, fee systems, and attendance tracking.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

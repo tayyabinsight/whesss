@@ -1,7 +1,6 @@
 'use client';
 import { useState, useEffect } from 'react';
 import Image from 'next/image';
-import wisdomLogo from '@/wisdom.png';
 
 export default function AdminLoginPage() {
   const [email, setEmail] = useState('');
@@ -81,7 +80,7 @@ export default function AdminLoginPage() {
         }}>
           <div className="admin-logo-container">
             <Image 
-              src={wisdomLogo} 
+              src="/wisdom.png" 
               alt="Wisdom House Logo" 
               width={100} 
               height={100} 

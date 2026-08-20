@@ -9,17 +9,17 @@ export const dynamic = 'force-dynamic';
 const supabase = createClient();
 
 function EditInvoiceModal({ invoice, assignments, onClose, onSave }: any) {
-    if (!invoice) return null;
-    
-    const [studentName, setStudentName] = useState(invoice.student_name);
-    const [fatherName, setFatherName] = useState(invoice.father_name);
-    const [className, setClassName] = useState(invoice.class_name);
-    const [booksGiven, setBooksGiven] = useState<string[]>(invoice.books_given || []);
-    const [copiesGiven, setCopiesGiven] = useState<any[]>(invoice.copies_given || []);
+    const [studentName, setStudentName] = useState(invoice?.student_name || '');
+    const [fatherName, setFatherName] = useState(invoice?.father_name || '');
+    const [className, setClassName] = useState(invoice?.class_name || '');
+    const [booksGiven, setBooksGiven] = useState<string[]>(invoice?.books_given || []);
+    const [copiesGiven, setCopiesGiven] = useState<any[]>(invoice?.copies_given || []);
     const [paymentAmount, setPaymentAmount] = useState(0);
     const [paymentDate, setPaymentDate] = useState(new Date().toISOString().split('T')[0]);
     const [paymentTime, setPaymentTime] = useState(new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }));
     const [saving, setSaving] = useState(false);
+
+    if (!invoice) return null;
 
     const availableClasses = Array.from(new Set(assignments.map((a: any) => a.class_name)));
 

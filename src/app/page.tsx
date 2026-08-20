@@ -2,7 +2,6 @@
 import Link from 'next/link';
 import { useState, useEffect } from 'react';
 import Image from 'next/image';
-import wisdomLogo from '@/wisdom.png';
 
 export default function LoginPage() {
   const [activeRole, setActiveRole] = useState<'student' | 'teacher'>('student');
@@ -61,7 +60,7 @@ export default function LoginPage() {
       <div className={`splash-screen ${showSplash ? '' : 'hide'}`}>
         <div className="splash-logo-container">
           <Image 
-            src={wisdomLogo} 
+            src="/wisdom.png" 
             alt="Wisdom House Logo" 
             width={180} 
             height={180} 
@@ -97,7 +96,7 @@ export default function LoginPage() {
         }}>
           <div className="logo-icon-container">
             <Image 
-              src={wisdomLogo} 
+              src="/wisdom.png" 
               alt="Wisdom House Logo" 
               width={76} 
               height={76} 
