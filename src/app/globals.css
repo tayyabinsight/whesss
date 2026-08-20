@@ -1,0 +1,176 @@
+@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@300;400;500;600;700;800&family=Inter:wght@300;400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/icon?family=Material+Icons');
+@import "tailwindcss";
+
+:root {
+  --primary: #0b193c;
+  --primary-container: #222e52;
+  --primary-fixed: #dbe1ff;
+  --primary-fixed-dim: #b9c5f2;
+  --secondary: #745b00;
+  --secondary-container: #fcd353;
+  --tertiary: #705d00;
+  --tertiary-container: #c9a810;
+  --surface: #f8f9fa;
+  --surface-bright: #f8f9fa;
+  --surface-container: #edeeef;
+  --surface-container-high: #e7e8e9;
+  --surface-container-highest: #e1e3e4;
+  --surface-container-low: #f3f4f5;
+  --surface-container-lowest: #ffffff;
+  --surface-dim: #d9dadb;
+  --on-surface: #191c1d;
+  --on-surface-variant: #454652;
+  --on-primary: #ffffff;
+  --on-secondary: #ffffff;
+  --on-secondary-container: #725a00;
+  --inverse-primary: #b9c5f2;
+  --outline: #767683;
+  --outline-variant: #c6c5d4;
+  --error: #ba1a1a;
+  --error-container: #ffdad6;
+  --background: #f8f9fa;
+  --on-background: #191c1d;
+  --shadow: rgba(25, 28, 29, 0.06);
+
+  /* Spacing */
+  --spacing-1: 0.25rem;
+  --spacing-2: 0.5rem;
+  --spacing-3: 0.75rem;
+  --spacing-4: 1rem;
+  --spacing-5: 1.25rem;
+  --spacing-6: 1.5rem;
+  --spacing-8: 2rem;
+  --spacing-10: 2.5rem;
+  --spacing-12: 3rem;
+  --spacing-16: 4rem;
+
+  /* Border radius */
+  --radius-sm: 0.25rem;
+  --radius-md: 0.5rem;
+  --radius-lg: 0.75rem;
+  --radius-xl: 1rem;
+  --radius-2xl: 1.5rem;
+  --radius-full: 9999px;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  font-family: 'Inter', sans-serif;
+  background-color: var(--background);
+  color: var(--on-surface);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  font-family: 'Manrope', sans-serif;
+  font-weight: 700;
+  color: var(--on-surface);
+}
+
+a { text-decoration: none; color: inherit; }
+
+/* Scrollbars */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: var(--surface-container-low); }
+::-webkit-scrollbar-thumb { background: var(--outline-variant); border-radius: var(--radius-full); }
+::-webkit-scrollbar-thumb:hover { background: var(--outline); }
+
+/* Animations */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes slideIn {
+  from { transform: translateX(-20px); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+
+@keyframes pulse-soft {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.7; }
+}
+
+.animate-fade-in { animation: fadeIn 0.4s ease-out forwards; }
+.animate-slide-in { animation: slideIn 0.3s ease-out forwards; }
+
+/* Utility */
+.glass {
+  background: rgba(248, 249, 250, 0.85);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+}
+
+.gradient-hero {
+  background: linear-gradient(135deg, var(--primary) 0%, var(--primary-container) 100%);
+}
+
+.card-lift {
+  box-shadow: 0 12px 32px -4px var(--shadow);
+  transition: box-shadow 0.3s ease, transform 0.3s ease;
+}
+
+.card-lift:hover {
+  box-shadow: 0 20px 40px -8px var(--shadow);
+  transform: translateY(-2px);
+}
+
+/* Material Icons in React */
+.material-icons {
+  font-family: 'Material Icons';
+  font-weight: normal;
+  font-style: normal;
+  font-size: 20px;
+  line-height: 1;
+  letter-spacing: normal;
+  text-transform: none;
+  display: inline-block;
+  white-space: nowrap;
+  word-wrap: normal;
+  direction: ltr;
+  -webkit-font-smoothing: antialiased;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.animate-spin {
+  animation: spin 1s linear infinite;
+}
+
+@media print {
+  body * {
+    visibility: hidden;
+  }
+  /* The voucher modal itself */
+  .fixed.inset-0 > div, .fixed.inset-0 > div * {
+    visibility: visible;
+  }
+  .fixed.inset-0 > div {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    max-height: none !important;
+    overflow: visible !important;
+    box-shadow: none !important;
+    transform: none !important;
+  }
+  /* Hide the close/print buttons during print */
+  button {
+    display: none !important;
+  }
+}
