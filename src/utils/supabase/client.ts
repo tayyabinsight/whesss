@@ -8,18 +8,5 @@ const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY ?? 
 export const createClient = () =>
   createBrowserClient(
     supabaseUrl,
-    supabaseKey,
-    {
-      global: {
-        fetch: (...args: Parameters<typeof fetch>) => {
-          if (typeof window !== 'undefined' && typeof window.fetch === 'function') {
-            return window.fetch(...args);
-          }
-          if (typeof globalThis !== 'undefined' && typeof globalThis.fetch === 'function') {
-            return globalThis.fetch(...args);
-          }
-          return fetch(...args);
-        },
-      },
-    }
+    supabaseKey
   );

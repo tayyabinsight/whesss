@@ -43,6 +43,8 @@ export const VoucherSlip = ({ voucher, items, copyType, student }: { voucher: an
     // Robust student data access
     const studentData = student || voucher?.students || voucher?.student || {};
 
+    const slipNo = voucher?.slip_no || voucher?.reference_number || (items && items.find(i => i.student_fees?.slip_no || i.student_fee?.slip_no)?.student_fees?.slip_no) || '';
+
     const formatDate = (dateStr: string) => {
         if (!dateStr) return 'N/A';
         const date = new Date(dateStr);
@@ -85,8 +87,13 @@ export const VoucherSlip = ({ voucher, items, copyType, student }: { voucher: an
             </div>
 
             {/* Metadata Row */}
-            <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 0.8fr', gap: '8px', fontSize: '0.7rem', marginBottom: '8px' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: slipNo ? '1fr 1fr 1fr' : '1.2fr 0.8fr', gap: '8px', fontSize: '0.7rem', marginBottom: '8px' }}>
                 <div style={{ display: 'flex', gap: '4px' }}><span style={{ fontWeight: 850 }}>Voucher No:</span> <span style={{ fontWeight: 950, borderBottom: '1.2px solid #000' }}>{voucher?.voucher_number || 'N/A'}</span></div>
+                {slipNo && (
+                    <div style={{ display: 'flex', gap: '4px', justifyContent: 'center' }}>
+                        <span style={{ fontWeight: 850 }}>Slip No:</span> <span style={{ fontWeight: 950, color: '#0f172a', borderBottom: '1.2px solid #000' }}>{slipNo}</span>
+                    </div>
+                )}
                 <div style={{ textAlign: 'right' }}><span style={{ fontWeight: 850 }}>Issue Date:</span> {formatDate(voucher?.issue_date)}</div>
             </div>
 

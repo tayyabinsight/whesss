@@ -1,5 +1,5 @@
 'use client';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import FeeLayout from '../FeeLayout';
 import { createClient } from '@/utils/supabase/client';
 
@@ -7,6 +7,17 @@ export const dynamic = 'force-dynamic';
 const supabase = createClient();
 
 const CLASSES = ['Mont', 'Nursery', 'Prep I', 'Prep II', 'Class 1', 'Class 2', 'Class 3', 'Class 4', 'Class 5', 'Class 6', 'Class 7', 'Class 8', 'Class 9', 'Class Matric'];
+
+const getClassOrder = (className: string) => {
+    if (!className) return 999;
+    const order = [
+        'mont', 'nursery', 'prep i', 'prep ii', 'prep 1', 'prep 2', 'prep',
+        'class 1', 'class 2', 'class 3', 'class 4', 'class 5',
+        'class 6', 'class 7', 'class 8', 'class 9', 'class matric', 'class 10'
+    ];
+    const index = order.indexOf(className.toLowerCase().trim());
+    return index === -1 ? 999 : index;
+};
 
 type FeeItem = {
     id: string;
@@ -33,6 +44,7 @@ export default function GenerateVouchers() {
 
     const [issueDate, setIssueDate] = useState(new Date().toISOString().split('T')[0]);
     const [dueDate, setDueDate] = useState(new Date(Date.now() + 10 * 86400000).toISOString().split('T')[0]);
+    const [manualSlipNo, setManualSlipNo] = useState('');
     const [generating, setGenerating] = useState(false);
     const [status, setStatus] = useState({ type: '', message: '' });
 
@@ -41,6 +53,7 @@ export default function GenerateVouchers() {
     const [registrySearch, setRegistrySearch] = useState('');
     const [registryStatus, setRegistryStatus] = useState('all');
     const [registryClass, setRegistryClass] = useState('all');
+    const [registryIssueDate, setRegistryIssueDate] = useState('all');
     const [viewingVoucher, setViewingVoucher] = useState<any | null>(null);
     const [voucherItems, setVoucherItems] = useState<any[]>([]);
     const [viewingStudent, setViewingStudent] = useState<any>(null);
@@ -49,6 +62,21 @@ export default function GenerateVouchers() {
     const [isBulkPrinting, setIsBulkPrinting] = useState(false);
     const [settings, setSettings] = useState<any>(null);
     const [lastSelectedIndex, setLastSelectedIndex] = useState<number | null>(null);
+
+    // Class-Wise Document / Report State
+    const [showClassWiseReportModal, setShowClassWiseReportModal] = useState(false);
+    const [reportIssueDate, setReportIssueDate] = useState<string>('all');
+    const [reportClassFilter, setReportClassFilter] = useState<string>('all');
+    const [classWiseReportData, setClassWiseReportData] = useState<any[]>([]);
+    const [reportTotals, setReportTotals] = useState<any>({
+        totalClasses: 0,
+        totalStudents: 0,
+        totalMonthlyFee: 0,
+        totalVoucherAmount: 0,
+        totalPaidAmount: 0,
+        totalDueAmount: 0
+    });
+    const [reportLoading, setReportLoading] = useState(false);
 
     // Editing State
     const [isEditing, setIsEditing] = useState(false);
@@ -95,7 +123,7 @@ export default function GenerateVouchers() {
                 const studentIds = Array.from(new Set(rawVouchers.map(v => v.student_id).filter(Boolean)));
                 const { data: studentsData } = await supabase
                     .from('students')
-                    .select('id, full_name, guardian_name, student_id')
+                    .select('id, full_name, guardian_name, father_name, student_id, grade, base_fee')
                     .in('id', studentIds);
 
                 const studentMap = Object.fromEntries(studentsData?.map(s => [s.id, s]) || []);
@@ -256,21 +284,49 @@ export default function GenerateVouchers() {
 
                 const finalTotal = Math.max(0, stdTotal + lateFine - discount);
                 const voucherNo = `${prefix}${String(currentInc).padStart(5, '0')}`;
-                const { data: vData, error: vError } = await supabase.from('fee_vouchers').insert([{
-                    voucher_number: voucherNo, student_id: target.id, class_name: target.grade,
-                    issue_date: issueDate, due_date: dueDate, total_amount: finalTotal,
-                    fine: lateFine, discount: discount, status: 'unpaid'
-                }]).select().single();
+                const voucherPayload: any = {
+                    voucher_number: voucherNo, 
+                    student_id: target.id, 
+                    class_name: target.grade,
+                    issue_date: issueDate, 
+                    due_date: dueDate, 
+                    total_amount: finalTotal,
+                    fine: lateFine, 
+                    discount: discount, 
+                    status: 'unpaid'
+                };
+                if (manualSlipNo.trim()) {
+                    voucherPayload.slip_no = manualSlipNo.trim();
+                }
+
+                let { data: vData, error: vError } = await supabase.from('fee_vouchers').insert([voucherPayload]).select().single();
                 
+                // Fallback if slip_no column does not exist in schema yet
+                if (vError && (vError.message?.includes('slip_no') || vError.code === 'PGRST204')) {
+                    delete voucherPayload.slip_no;
+                    const retry = await supabase.from('fee_vouchers').insert([voucherPayload]).select().single();
+                    vData = retry.data;
+                    vError = retry.error;
+                }
+
                 if (vError) throw vError;
+
                 const itemInserts = itemsToVoucher.map(f => ({ voucher_id: vData.id, fee_category_id: f.fee_category_id, student_fee_id: f.id, amount: f.amount }));
                 await supabase.from('fee_voucher_items').insert(itemInserts);
+
+                // If a slip number was manually specified, also tag the student_fees
+                if (manualSlipNo.trim()) {
+                    for (const f of itemsToVoucher) {
+                        await supabase.from('student_fees').update({ notes: `SLIP_NO:${manualSlipNo.trim()}` }).eq('id', f.id);
+                    }
+                }
+
                 currentInc++; successCount++;
             }
             await supabase.from('fee_settings').update({ current_increment: currentInc }).eq('id', latestSettings.id);
             setStatus({ type: 'success', message: `✅ Successfully generated ${successCount} consolidated vouchers.` });
             fetchVouchers();
-            if (targetAudience === 'student') { setSelectedStudent(null); setUnpaidFees([]); }
+            if (targetAudience === 'student') { setSelectedStudent(null); setUnpaidFees([]); setManualSlipNo(''); }
         } catch (err: any) { setStatus({ type: 'error', message: err.message }); } finally { setGenerating(false); }
     };
 
@@ -425,6 +481,29 @@ export default function GenerateVouchers() {
         }
     };
 
+    const formatDateStr = (dateStr: string) => {
+        if (!dateStr) return 'N/A';
+        try {
+            const d = new Date(dateStr);
+            return `${String(d.getDate()).padStart(2, '0')}-${String(d.getMonth() + 1).padStart(2, '0')}-${d.getFullYear()}`;
+        } catch {
+            return dateStr;
+        }
+    };
+
+    const availableIssueDates = useMemo(() => {
+        const datesMap = new Map<string, number>();
+        allVouchers.forEach(v => {
+            if (v.issue_date) {
+                const d = v.issue_date.split('T')[0];
+                datesMap.set(d, (datesMap.get(d) || 0) + 1);
+            }
+        });
+        return Array.from(datesMap.entries())
+            .sort((a, b) => new Date(b[0]).getTime() - new Date(a[0]).getTime())
+            .map(([date, count]) => ({ date, count }));
+    }, [allVouchers]);
+
     const handleBulkPrint = async () => {
         if (selectedVoucherIds.size === 0) return;
         setIsBulkPrinting(true);
@@ -439,6 +518,391 @@ export default function GenerateVouchers() {
         }
         setBulkPrintData(results);
         setStatus({ type: '', message: '' });
+    };
+
+    const handleBulkPrintByDate = async (targetDate: string) => {
+        if (!targetDate || targetDate === 'all') {
+            if (allVouchers.length === 0) return alert('No vouchers available to print.');
+            setSelectedVoucherIds(new Set(filteredVouchers.map(v => v.id)));
+            handleBulkPrint();
+            return;
+        }
+
+        const targetVouchers = allVouchers.filter(v => v.issue_date && v.issue_date.split('T')[0] === targetDate);
+        if (targetVouchers.length === 0) return alert(`No vouchers found issued on ${formatDateStr(targetDate)}.`);
+        
+        setIsBulkPrinting(true);
+        setStatus({ type: 'info', message: `Preparing bulk print for ${targetVouchers.length} vouchers issued on ${formatDateStr(targetDate)}...` });
+        const results = [];
+        for (const v of targetVouchers) {
+            const full = await fetchFullVoucherData(v);
+            results.push({ voucher: v, ...full });
+        }
+        setBulkPrintData(results);
+        setStatus({ type: '', message: '' });
+    };
+
+    const handleOpenClassWiseReport = (initialDate = 'all') => {
+        const dateToUse = initialDate !== 'all' ? initialDate : (registryIssueDate !== 'all' ? registryIssueDate : (availableIssueDates[0]?.date || 'all'));
+        setReportIssueDate(dateToUse);
+        setReportClassFilter(registryClass !== 'all' ? registryClass : 'all');
+        setShowClassWiseReportModal(true);
+        generateClassWiseReportData(dateToUse, registryClass !== 'all' ? registryClass : 'all');
+    };
+
+    const generateClassWiseReportData = async (targetIssueDate = reportIssueDate, targetClass = reportClassFilter) => {
+        setReportLoading(true);
+        try {
+            // 1. Filter vouchers by target issue date and class
+            const matchedVouchers = allVouchers.filter(v => {
+                const vDate = v.issue_date ? v.issue_date.split('T')[0] : '';
+                const matchesDate = !targetIssueDate || targetIssueDate === 'all' || vDate === targetIssueDate;
+                const matchesClass = !targetClass || targetClass === 'all' || v.class_name === targetClass || v.students?.grade === targetClass;
+                return matchesDate && matchesClass;
+            });
+
+            if (matchedVouchers.length === 0) {
+                setClassWiseReportData([]);
+                setReportTotals({ totalClasses: 0, totalStudents: 0, totalMonthlyFee: 0, totalVoucherAmount: 0, totalPaidAmount: 0, totalDueAmount: 0 });
+                return;
+            }
+
+            const vIds = matchedVouchers.map(v => v.id);
+
+            // 2. Fetch all voucher items with category and student fee details in chunks of 500
+            let allItems: any[] = [];
+            for (let i = 0; i < vIds.length; i += 500) {
+                const chunk = vIds.slice(i, i + 500);
+                const { data: itemsChunk, error: itemsErr } = await supabase
+                    .from('fee_voucher_items')
+                    .select('*, fee_categories(name), student_fees(month, amount)')
+                    .in('voucher_id', chunk);
+
+                if (itemsErr) {
+                    console.error('Error fetching report items chunk:', itemsErr);
+                } else if (itemsChunk) {
+                    allItems = [...allItems, ...itemsChunk];
+                }
+            }
+
+            // Group items by voucher_id
+            const itemsByVoucher = new Map<string, any[]>();
+            allItems.forEach(item => {
+                const list = itemsByVoucher.get(item.voucher_id) || [];
+                list.push(item);
+                itemsByVoucher.set(item.voucher_id, list);
+            });
+
+            // 3. Process each voucher into student record
+            const processedRecords = matchedVouchers.map(v => {
+                const items = itemsByVoucher.get(v.id) || [];
+                const std = v.students || {};
+
+                // Extract monthly base fee
+                let monthlyFee = Number(std.base_fee || 0);
+                if (!monthlyFee || monthlyFee === 0) {
+                    const tuitionItem = items.find(it => {
+                        const name = (it.fee_categories?.name || '').toLowerCase();
+                        return name.includes('tuition') || name.includes('monthly');
+                    });
+                    if (tuitionItem) {
+                        monthlyFee = Number(tuitionItem.amount || 0);
+                    } else if (items.length > 0) {
+                        monthlyFee = Number(items[0].amount || 0);
+                    }
+                }
+
+                // Extract month names & fees
+                const monthNamesSet = new Set<string>();
+                const otherCategoriesSet = new Set<string>();
+
+                items.forEach(it => {
+                    const catName = it.fee_categories?.name || '';
+                    const m = it.student_fees?.month || it.month || '';
+                    if (m) monthNamesSet.add(m);
+                    if (!catName.toLowerCase().includes('tuition') && !catName.toLowerCase().includes('monthly') && catName) {
+                        otherCategoriesSet.add(catName);
+                    }
+                });
+
+                const uniqueMonths = Array.from(monthNamesSet);
+                let monthsSummary = '';
+                if (uniqueMonths.length > 0) {
+                    monthsSummary = uniqueMonths.join(', ');
+                    if (uniqueMonths.length > 1) {
+                        monthsSummary += ` (${uniqueMonths.length} Mos)`;
+                    }
+                } else {
+                    monthsSummary = 'Current Cycle';
+                }
+
+                if (otherCategoriesSet.size > 0) {
+                    monthsSummary += ` + ${Array.from(otherCategoriesSet).join(', ')}`;
+                }
+
+                const voucherAmount = Number(v.total_amount || 0);
+                const isPaid = v.status === 'paid';
+                const paidAmount = isPaid ? voucherAmount : Number(v.paid_amount || 0);
+                const dueAmount = isPaid ? 0 : Math.max(0, voucherAmount - paidAmount);
+
+                return {
+                    voucherId: v.id,
+                    voucherNumber: v.voucher_number,
+                    slipNo: v.slip_no || '',
+                    issueDate: v.issue_date,
+                    dueDate: v.due_date,
+                    studentId: std.student_id || '---',
+                    studentName: std.full_name || 'N/A',
+                    fatherName: std.father_name || std.guardian_name || 'N/A',
+                    className: v.class_name || std.grade || 'General',
+                    monthlyFee: monthlyFee,
+                    monthsCount: Math.max(1, uniqueMonths.length),
+                    monthsSummary: monthsSummary,
+                    voucherAmount: voucherAmount,
+                    paidAmount: paidAmount,
+                    dueAmount: dueAmount,
+                    status: v.status,
+                    fine: Number(v.fine || 0),
+                    discount: Number(v.discount || 0)
+                };
+            });
+
+            // 4. Group by Class and sort
+            const classMap = new Map<string, any[]>();
+            processedRecords.forEach(rec => {
+                const cls = rec.className || 'General';
+                const list = classMap.get(cls) || [];
+                list.push(rec);
+                classMap.set(cls, list);
+            });
+
+            const sortedClasses = Array.from(classMap.keys()).sort((a, b) => getClassOrder(a) - getClassOrder(b));
+
+            let grandStudents = 0;
+            let grandMonthlyFee = 0;
+            let grandVoucherAmount = 0;
+            let grandPaid = 0;
+            let grandDue = 0;
+
+            const groupedData = sortedClasses.map(clsName => {
+                const classStudents = classMap.get(clsName) || [];
+                classStudents.sort((a, b) => (a.studentName || '').localeCompare(b.studentName || ''));
+
+                const classTotalMonthly = classStudents.reduce((acc, curr) => acc + curr.monthlyFee, 0);
+                const classTotalVoucherAmt = classStudents.reduce((acc, curr) => acc + curr.voucherAmount, 0);
+                const classTotalPaid = classStudents.reduce((acc, curr) => acc + curr.paidAmount, 0);
+                const classTotalDue = classStudents.reduce((acc, curr) => acc + curr.dueAmount, 0);
+
+                grandStudents += classStudents.length;
+                grandMonthlyFee += classTotalMonthly;
+                grandVoucherAmount += classTotalVoucherAmt;
+                grandPaid += classTotalPaid;
+                grandDue += classTotalDue;
+
+                return {
+                    className: clsName,
+                    students: classStudents,
+                    subtotal: {
+                        count: classStudents.length,
+                        totalMonthlyFee: classTotalMonthly,
+                        totalVoucherAmount: classTotalVoucherAmt,
+                        totalPaid: classTotalPaid,
+                        totalDue: classTotalDue
+                    }
+                };
+            });
+
+            setClassWiseReportData(groupedData);
+            setReportTotals({
+                totalClasses: groupedData.length,
+                totalStudents: grandStudents,
+                totalMonthlyFee: grandMonthlyFee,
+                totalVoucherAmount: grandVoucherAmount,
+                totalPaidAmount: grandPaid,
+                totalDueAmount: grandDue
+            });
+        } catch (err) {
+            console.error('Error generating class-wise report:', err);
+        } finally {
+            setReportLoading(false);
+        }
+    };
+
+    const handlePrintClassWiseReport = () => {
+        const reportElem = document.getElementById('class-wise-report-printable');
+        if (!reportElem) return alert('Report content not ready.');
+        const p = window.open('', '', 'height=900,width=1200');
+        if (!p) return alert('Pop-up blocked. Please allow pop-ups to print or download PDF.');
+
+        p.document.write(`
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>Class-Wise Fee Statement - Wisdom House</title>
+                <style>
+                    @page {
+                        size: A4 portrait;
+                        margin: 8mm 10mm;
+                    }
+                    * { box-sizing: border-box; }
+                    body {
+                        margin: 0;
+                        padding: 0;
+                        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+                        color: #0f172a;
+                        background: #fff;
+                        font-size: 10px;
+                        line-height: 1.3;
+                    }
+                    .report-header {
+                        text-align: center;
+                        border-bottom: 2px solid #0f172a;
+                        padding-bottom: 8px;
+                        margin-bottom: 12px;
+                    }
+                    .school-title {
+                        font-size: 16px;
+                        font-weight: 900;
+                        letter-spacing: 0.5px;
+                        margin: 0;
+                        text-transform: uppercase;
+                    }
+                    .report-subtitle {
+                        font-size: 11px;
+                        font-weight: 800;
+                        margin: 3px 0 6px 0;
+                        color: #1e293b;
+                    }
+                    .meta-bar {
+                        display: flex;
+                        justify-content: space-between;
+                        font-size: 8.5px;
+                        font-weight: 700;
+                        color: #475569;
+                        background: #f8fafc;
+                        padding: 4px 8px;
+                        border-radius: 4px;
+                        border: 1px solid #e2e8f0;
+                    }
+                    .class-section {
+                        margin-bottom: 16px;
+                        page-break-inside: avoid;
+                    }
+                    .class-title-banner {
+                        background: #0f172a;
+                        color: #fff;
+                        padding: 5px 10px;
+                        font-size: 10.5px;
+                        font-weight: 900;
+                        display: flex;
+                        justify-content: space-between;
+                        align-items: center;
+                        border-radius: 4px 4px 0 0;
+                        text-transform: uppercase;
+                        letter-spacing: 0.5px;
+                    }
+                    table {
+                        width: 100%;
+                        border-collapse: collapse;
+                        font-size: 8.5px;
+                    }
+                    th, td {
+                        border: 1px solid #cbd5e1;
+                        padding: 4px 6px;
+                        text-align: left;
+                    }
+                    th {
+                        background: #f1f5f9;
+                        font-weight: 800;
+                        color: #334155;
+                        text-transform: uppercase;
+                        font-size: 8px;
+                    }
+                    .num {
+                        text-align: right;
+                        font-weight: 700;
+                    }
+                    .subtotal-row {
+                        background: #f8fafc;
+                        font-weight: 800;
+                        border-top: 1.5px solid #0f172a;
+                        border-bottom: 1.5px solid #0f172a;
+                    }
+                    .grand-total-card {
+                        margin-top: 20px;
+                        border: 2px solid #0f172a;
+                        border-radius: 6px;
+                        padding: 10px 14px;
+                        background: #f8fafc;
+                        page-break-inside: avoid;
+                    }
+                    .grand-total-title {
+                        font-size: 11px;
+                        font-weight: 900;
+                        text-transform: uppercase;
+                        margin-bottom: 8px;
+                        color: #0f172a;
+                        border-bottom: 1px solid #cbd5e1;
+                        padding-bottom: 4px;
+                    }
+                    .grand-grid {
+                        display: grid;
+                        grid-template-columns: repeat(5, 1fr);
+                        gap: 8px;
+                        text-align: center;
+                    }
+                    .grand-box {
+                        padding: 6px;
+                        background: #fff;
+                        border: 1px solid #cbd5e1;
+                        border-radius: 4px;
+                    }
+                    .grand-label {
+                        font-size: 7.5px;
+                        font-weight: 800;
+                        color: #64748b;
+                        text-transform: uppercase;
+                    }
+                    .grand-val {
+                        font-size: 12px;
+                        font-weight: 900;
+                        color: #0f172a;
+                        margin-top: 2px;
+                    }
+                    .grand-due {
+                        color: #dc2626;
+                    }
+                    .signatures {
+                        display: flex;
+                        justify-content: space-between;
+                        margin-top: 36px;
+                        padding-top: 8px;
+                        page-break-inside: avoid;
+                    }
+                    .sig-line {
+                        border-top: 1px solid #000;
+                        width: 140px;
+                        text-align: center;
+                        font-size: 8px;
+                        font-weight: 800;
+                        padding-top: 3px;
+                    }
+                    @media print {
+                        .no-print { display: none !important; }
+                    }
+                </style>
+            </head>
+            <body>
+                ${reportElem.innerHTML}
+            </body>
+            </html>
+        `);
+        p.document.close();
+        p.focus();
+        setTimeout(() => {
+            p.print();
+            p.close();
+        }, 600);
     };
 
     const toggleVoucherSelection = (id: string, index: number, event?: React.MouseEvent) => {
@@ -465,12 +929,24 @@ export default function GenerateVouchers() {
     };
 
     const filteredVouchers = allVouchers.filter(v => {
+        const todayStr = new Date().toISOString().split('T')[0];
+        const isPastDue = v.due_date && v.due_date < todayStr;
+        
+        const slipVal = (v.slip_no || '').toLowerCase();
         const matchesSearch = v.voucher_number.toLowerCase().includes(registrySearch.toLowerCase()) || 
+                              slipVal.includes(registrySearch.toLowerCase()) ||
                               v.students?.full_name?.toLowerCase().includes(registrySearch.toLowerCase()) ||
                               v.students?.guardian_name?.toLowerCase().includes(registrySearch.toLowerCase());
-        const matchesStatus = registryStatus === 'all' || v.status === registryStatus;
+
+        let matchesStatus = true;
+        if (registryStatus === 'unpaid') matchesStatus = v.status === 'unpaid';
+        else if (registryStatus === 'paid') matchesStatus = v.status === 'paid';
+        else if (registryStatus === 'active') matchesStatus = v.status === 'unpaid' && !isPastDue;
+        else if (registryStatus === 'old_past_due') matchesStatus = isPastDue;
+        
         const matchesClass = registryClass === 'all' || v.class_name === registryClass;
-        return matchesSearch && matchesStatus && matchesClass;
+        const matchesIssueDate = registryIssueDate === 'all' || (v.issue_date && v.issue_date.split('T')[0] === registryIssueDate);
+        return matchesSearch && matchesStatus && matchesClass && matchesIssueDate;
     });
 
     const VoucherSlip = ({ voucher, items, copyType, student }: { voucher: any, items: any[], copyType: string, student?: any }) => {
@@ -557,7 +1033,12 @@ export default function GenerateVouchers() {
 
                 {/* Metadata Row */}
                 <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 0.8fr', gap: '8px', fontSize: '0.7rem', marginBottom: '8px' }}>
-                    <div style={{ display: 'flex', gap: '4px' }}><span style={{ fontWeight: 850 }}>Voucher No:</span> <span style={{ fontWeight: 950, borderBottom: '1.2px solid #000' }}>{voucher?.voucher_number || 'N/A'}</span></div>
+                    <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
+                        <div><span style={{ fontWeight: 850 }}>Voucher No:</span> <span style={{ fontWeight: 950, borderBottom: '1.2px solid #000' }}>{voucher?.voucher_number || 'N/A'}</span></div>
+                        {voucher?.slip_no && (
+                            <div style={{ marginLeft: '6px' }}><span style={{ fontWeight: 850 }}>Slip #:</span> <span style={{ fontWeight: 950, borderBottom: '1.2px solid #000', color: '#0f172a' }}>{voucher.slip_no}</span></div>
+                        )}
+                    </div>
                     <div style={{ textAlign: 'right' }}><span style={{ fontWeight: 850 }}>Issue Date:</span> {formatDate(voucher?.issue_date)}</div>
                 </div>
 
@@ -768,6 +1249,18 @@ export default function GenerateVouchers() {
                             <div><label style={{ fontSize: '0.6rem', fontWeight: 800, color: '#10b981', marginBottom: '6px', display: 'block', textTransform: 'uppercase' }}>Discount (-)</label><input type="number" value={discount} onChange={e => setDiscount(Number(e.target.value))} style={{ width: '100%', padding: '10px', borderRadius: '10px', border: '1px solid #dcfce7', background: '#f8fffb', fontWeight: 800, outline: 'none', color: '#10b981', fontSize: '0.9rem' }} /></div>
                         </div>
 
+                        <div style={{ paddingBottom: '16px' }}>
+                            <label style={{ fontSize: '0.6rem', fontWeight: 800, color: '#0f172a', marginBottom: '6px', display: 'flex', alignItems: 'center', gap: '4px', textTransform: 'uppercase' }}>
+                                <span className="material-icons" style={{ fontSize: '14px' }}>tag</span> Manual Slip No (Optional)
+                            </label>
+                            <input 
+                                placeholder="e.g. SLIP-2024-001 or manual serial..." 
+                                value={manualSlipNo} 
+                                onChange={e => setManualSlipNo(e.target.value)} 
+                                style={{ width: '100%', padding: '10px', borderRadius: '10px', border: '1px solid #cbd5e1', fontWeight: 700, outline: 'none', fontSize: '0.85rem', background: '#f8fafc' }} 
+                            />
+                        </div>
+
                         {status.message && <div style={{ padding: '12px 16px', borderRadius: '12px', background: status.type === 'error' ? '#fef2f2' : '#f0fdf4', color: status.type === 'error' ? '#991b1b' : '#166534', fontWeight: 700, fontSize: '0.8rem', marginBottom: '16px', border: '1px solid', borderColor: status.type === 'error' ? '#fee2e2' : '#dcfce7' }}>{status.message}</div>}
 
                         <button onClick={handleGenerate} disabled={generating || (targetAudience === 'student' && !selectedStudent)} style={{ width: '100%', padding: '16px', borderRadius: '16px', background: 'linear-gradient(135deg, #0f172a 0%, #1e293b 100%)', color: '#fff', fontWeight: 800, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '10px', boxShadow: '0 4px 12px rgba(15, 23, 42, 0.2)' }}>{generating ? <span className="material-icons spinning" style={{ fontSize: '20px' }}>refresh</span> : <span className="material-icons" style={{ fontSize: '20px' }}>receipt_long</span>} {generating ? 'Processing...' : 'Generate Voucher'}</button>
@@ -793,36 +1286,104 @@ export default function GenerateVouchers() {
 
                 {/* Master Voucher Registry */}
                 <div style={{ background: '#fff', borderRadius: '28px', padding: '24px', border: '1px solid #e2e8f0', boxShadow: '0 4px 20px rgba(0,0,0,0.02)' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '24px' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px', flexWrap: 'wrap', gap: '12px' }}>
                         <div>
                             <h3 style={{ margin: 0, fontSize: '1.25rem', fontWeight: 800, color: '#0f172a' }}>Voucher Registry</h3>
-                            <p style={{ margin: '2px 0 0 0', color: '#64748b', fontWeight: 500, fontSize: '0.8rem' }}>Manage all generated institutional slips.</p>
+                            <p style={{ margin: '2px 0 0 0', color: '#64748b', fontWeight: 500, fontSize: '0.8rem' }}>Manage, filter, bulk print, and generate class-wise reports.</p>
                         </div>
-                        <div style={{ display: 'flex', gap: '8px' }}>
+                        <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
+                            <button 
+                                onClick={() => handleOpenClassWiseReport(registryIssueDate)} 
+                                style={{ background: '#0284c7', color: '#fff', padding: '8px 14px', borderRadius: '10px', fontWeight: 800, fontSize: '0.75rem', display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer', border: 'none', boxShadow: '0 2px 8px rgba(2, 132, 199, 0.25)' }}
+                            >
+                                <span className="material-icons" style={{ fontSize: '16px' }}>assessment</span>
+                                Class-Wise Fee Document (PDF)
+                            </button>
+
                             {selectedVoucherIds.size > 0 && (
-                                <button onClick={handleBulkPrint} style={{ background: '#0f172a', color: '#fff', padding: '0 16px', borderRadius: '10px', fontWeight: 800, fontSize: '0.75rem', display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer', border: 'none' }}>
+                                <button onClick={handleBulkPrint} style={{ background: '#0f172a', color: '#fff', padding: '8px 14px', borderRadius: '10px', fontWeight: 800, fontSize: '0.75rem', display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer', border: 'none' }}>
                                     <span className="material-icons" style={{ fontSize: '16px' }}>print</span>
                                     Bulk Print ({selectedVoucherIds.size})
                                 </button>
                             )}
+
                             <div style={{ position: 'relative' }}>
                                 <span className="material-icons" style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: '#94a3b8', fontSize: 18 }}>search</span>
-                                <input placeholder="Search..." value={registrySearch} onChange={e => setRegistrySearch(e.target.value)} style={{ padding: '8px 12px 8px 34px', borderRadius: '10px', border: '1px solid #e2e8f0', fontWeight: 600, outline: 'none', width: '180px', fontSize: '0.8rem', background: '#f8fafc' }} />
+                                <input placeholder="Search name/slip..." value={registrySearch} onChange={e => setRegistrySearch(e.target.value)} style={{ padding: '8px 12px 8px 34px', borderRadius: '10px', border: '1px solid #e2e8f0', fontWeight: 600, outline: 'none', width: '160px', fontSize: '0.8rem', background: '#f8fafc' }} />
                             </div>
+
+                            <select value={registryIssueDate} onChange={e => setRegistryIssueDate(e.target.value)} style={{ padding: '8px 12px', borderRadius: '10px', border: '1px solid #cbd5e1', fontWeight: 700, outline: 'none', fontSize: '0.8rem', background: registryIssueDate !== 'all' ? '#f0f9ff' : '#f8fafc', color: registryIssueDate !== 'all' ? '#0369a1' : '#0f172a' }}>
+                                <option value="all">Issue Date: All Dates</option>
+                                {availableIssueDates.map(d => (
+                                    <option key={d.date} value={d.date}>
+                                        {formatDateStr(d.date)} ({d.count} Vouchers)
+                                    </option>
+                                ))}
+                            </select>
+
                             <select value={registryClass} onChange={e => setRegistryClass(e.target.value)} style={{ padding: '8px 12px', borderRadius: '10px', border: '1px solid #e2e8f0', fontWeight: 700, outline: 'none', fontSize: '0.8rem', background: '#f8fafc', color: '#0f172a' }}>
                                 <option value="all">Class: All</option>
                                 {CLASSES.map(c => <option key={c} value={c}>{c}</option>)}
                             </select>
+
                             <select value={registryStatus} onChange={e => setRegistryStatus(e.target.value)} style={{ padding: '8px 12px', borderRadius: '10px', border: '1px solid #e2e8f0', fontWeight: 700, outline: 'none', fontSize: '0.8rem', background: '#f8fafc', color: '#0f172a' }}>
                                 <option value="all">Status: All</option>
-                                <option value="unpaid">Unpaid</option>
-                                <option value="paid">Paid</option>
+                                <option value="active">Active (Before Due)</option>
+                                <option value="old_past_due">Old / Past Due</option>
+                                <option value="unpaid">Unpaid Only</option>
+                                <option value="paid">Paid Only</option>
                             </select>
-                            <button onClick={fetchVouchers} disabled={loadingRegistry} style={{ background: '#f1f5f9', border: 'none', borderRadius: '10px', width: 36, height: 36, cursor: 'pointer', color: '#64748b' }}>
+
+                            <button onClick={fetchVouchers} disabled={loadingRegistry} style={{ background: '#f1f5f9', border: 'none', borderRadius: '10px', width: 36, height: 36, cursor: 'pointer', color: '#64748b', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
                                 <span className={`material-icons ${loadingRegistry ? 'spinning' : ''}`} style={{ fontSize: '20px' }}>refresh</span>
                             </button>
                         </div>
                     </div>
+
+                    {/* Quick Date Action Banner when a date is selected */}
+                    {registryIssueDate !== 'all' && (
+                        <div style={{ marginBottom: '16px', padding: '12px 16px', background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: '14px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '10px' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                <span className="material-icons" style={{ color: '#16a34a', fontSize: '20px' }}>event_available</span>
+                                <div>
+                                    <span style={{ fontWeight: 800, fontSize: '0.85rem', color: '#15803d' }}>
+                                        Filtered by Issue Date: {formatDateStr(registryIssueDate)}
+                                    </span>
+                                    <span style={{ marginLeft: '8px', fontSize: '0.75rem', fontWeight: 600, color: '#166534' }}>
+                                        ({filteredVouchers.length} Vouchers Found)
+                                    </span>
+                                </div>
+                            </div>
+                            <div style={{ display: 'flex', gap: '8px' }}>
+                                <button 
+                                    onClick={() => setSelectedVoucherIds(new Set(filteredVouchers.map(v => v.id)))}
+                                    style={{ padding: '6px 12px', background: '#fff', border: '1px solid #86efac', borderRadius: '8px', color: '#15803d', fontWeight: 800, fontSize: '0.75rem', cursor: 'pointer' }}
+                                >
+                                    Select All on Date ({filteredVouchers.length})
+                                </button>
+                                <button 
+                                    onClick={() => handleBulkPrintByDate(registryIssueDate)}
+                                    style={{ padding: '6px 12px', background: '#15803d', border: 'none', borderRadius: '8px', color: '#fff', fontWeight: 800, fontSize: '0.75rem', display: 'flex', alignItems: 'center', gap: '4px', cursor: 'pointer' }}
+                                >
+                                    <span className="material-icons" style={{ fontSize: '14px' }}>print</span>
+                                    Bulk Print Date Slips
+                                </button>
+                                <button 
+                                    onClick={() => handleOpenClassWiseReport(registryIssueDate)}
+                                    style={{ padding: '6px 12px', background: '#0284c7', border: 'none', borderRadius: '8px', color: '#fff', fontWeight: 800, fontSize: '0.75rem', display: 'flex', alignItems: 'center', gap: '4px', cursor: 'pointer' }}
+                                >
+                                    <span className="material-icons" style={{ fontSize: '14px' }}>picture_as_pdf</span>
+                                    Date Fee PDF Report
+                                </button>
+                                <button 
+                                    onClick={() => setRegistryIssueDate('all')}
+                                    style={{ padding: '6px 10px', background: 'transparent', border: 'none', color: '#64748b', fontWeight: 700, fontSize: '0.75rem', cursor: 'pointer' }}
+                                >
+                                    Clear Date Filter
+                                </button>
+                            </div>
+                        </div>
+                    )}
 
                     <div style={{ overflowX: 'auto' }}>
                         <table style={{ width: '100%', borderCollapse: 'collapse' }}>
@@ -835,6 +1396,7 @@ export default function GenerateVouchers() {
                                         }} checked={selectedVoucherIds.size === filteredVouchers.length && filteredVouchers.length > 0} />
                                     </th>
                                     <th style={{ padding: '12px 16px', fontSize: '0.65rem', fontWeight: 800, color: '#64748b', textTransform: 'uppercase' }}>Voucher No</th>
+                                    <th style={{ padding: '12px 16px', fontSize: '0.65rem', fontWeight: 800, color: '#64748b', textTransform: 'uppercase' }}>Slip No</th>
                                     <th style={{ padding: '12px 16px', fontSize: '0.65rem', fontWeight: 800, color: '#64748b', textTransform: 'uppercase' }}>Student Name</th>
                                     <th style={{ padding: '12px 16px', fontSize: '0.65rem', fontWeight: 800, color: '#64748b', textTransform: 'uppercase' }}>Father Name</th>
                                     <th style={{ padding: '12px 16px', fontSize: '0.65rem', fontWeight: 800, color: '#64748b', textTransform: 'uppercase' }}>Class</th>
@@ -845,7 +1407,10 @@ export default function GenerateVouchers() {
                                 </tr>
                             </thead>
                             <tbody>
-                                {filteredVouchers.map(v => (
+                                {filteredVouchers.map(v => {
+                                    const todayStr = new Date().toISOString().split('T')[0];
+                                    const isPastDue = v.due_date && v.due_date < todayStr;
+                                    return (
                                     <tr key={v.id} style={{ borderBottom: '1px solid #f1f5f9', background: selectedVoucherIds.has(v.id) ? '#f0f9ff' : 'transparent', transition: '0.2s' }}>
                                         <td style={{ padding: '12px 16px' }}>
                                             <input 
@@ -857,6 +1422,15 @@ export default function GenerateVouchers() {
                                             />
                                         </td>
                                         <td style={{ padding: '12px 16px', fontWeight: 800, fontSize: '0.85rem', color: '#0f172a' }}>{v.voucher_number}</td>
+                                        <td style={{ padding: '12px 16px' }}>
+                                            {v.slip_no ? (
+                                                <span style={{ padding: '3px 8px', borderRadius: '6px', background: '#f1f5f9', color: '#0f172a', fontWeight: 800, fontSize: '0.75rem', border: '1px solid #cbd5e1' }}>
+                                                    #{v.slip_no}
+                                                </span>
+                                            ) : (
+                                                <span style={{ color: '#cbd5e1', fontSize: '0.75rem', fontWeight: 600 }}>---</span>
+                                            )}
+                                        </td>
                                         <td style={{ padding: '12px 16px', fontWeight: 700, fontSize: '0.85rem', color: '#0f172a' }}>{v.students?.full_name || '---'}</td>
                                         <td style={{ padding: '12px 16px', fontSize: '0.75rem', color: '#64748b', fontWeight: 600 }}>{v.students?.guardian_name || '---'}</td>
                                         <td style={{ padding: '12px 16px', fontSize: '0.75rem', fontWeight: 700, color: '#0f172a' }}>{v.class_name}</td>
@@ -866,7 +1440,15 @@ export default function GenerateVouchers() {
                                         })() : 'N/A'}</td>
                                         <td style={{ padding: '12px 16px', fontWeight: 800, color: '#0f172a', fontSize: '0.85rem' }}>Rs {(v.total_amount || 0).toLocaleString()}</td>
                                         <td style={{ padding: '12px 16px' }}>
-                                            <span style={{ padding: '4px 10px', borderRadius: '8px', fontSize: '0.6rem', fontWeight: 800, background: v.status === 'paid' ? '#dcfce7' : '#fee2e2', color: v.status === 'paid' ? '#15803d' : '#b91c1c', textTransform: 'uppercase' }}>{v.status}</span>
+                                            {v.status === 'paid' ? (
+                                                <span style={{ padding: '4px 10px', borderRadius: '8px', fontSize: '0.6rem', fontWeight: 800, background: '#dcfce7', color: '#15803d', textTransform: 'uppercase' }}>PAID</span>
+                                            ) : isPastDue ? (
+                                                <span style={{ padding: '4px 10px', borderRadius: '8px', fontSize: '0.6rem', fontWeight: 800, background: '#fef3c7', color: '#92400e', textTransform: 'uppercase', display: 'inline-flex', alignItems: 'center', gap: '3px' }}>
+                                                    <span className="material-icons" style={{ fontSize: '12px' }}>history</span> OLD / PAST DUE
+                                                </span>
+                                            ) : (
+                                                <span style={{ padding: '4px 10px', borderRadius: '8px', fontSize: '0.6rem', fontWeight: 800, background: '#fee2e2', color: '#b91c1c', textTransform: 'uppercase' }}>ACTIVE</span>
+                                            )}
                                         </td>
                                         <td style={{ padding: '12px 16px' }}>
                                             <div style={{ display: 'flex', gap: '6px' }}>
@@ -876,10 +1458,11 @@ export default function GenerateVouchers() {
                                             </div>
                                         </td>
                                     </tr>
-                                ))}
+                                    );
+                                })}
                                 {filteredVouchers.length === 0 && !loadingRegistry && (
                                     <tr>
-                                        <td colSpan={9} style={{ padding: '48px', textAlign: 'center', color: '#94a3b8', fontSize: '0.9rem', fontWeight: 600 }}>
+                                        <td colSpan={10} style={{ padding: '48px', textAlign: 'center', color: '#94a3b8', fontSize: '0.9rem', fontWeight: 600 }}>
                                             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '12px' }}>
                                                 <span className="material-icons" style={{ fontSize: '48px', opacity: 0.3 }}>receipt_long</span>
                                                 No vouchers found matching your criteria.
@@ -889,7 +1472,7 @@ export default function GenerateVouchers() {
                                 )}
                                 {loadingRegistry && allVouchers.length === 0 && (
                                     <tr>
-                                        <td colSpan={9} style={{ padding: '48px', textAlign: 'center', color: '#64748b', fontSize: '0.9rem', fontWeight: 600 }}>
+                                        <td colSpan={10} style={{ padding: '48px', textAlign: 'center', color: '#64748b', fontSize: '0.9rem', fontWeight: 600 }}>
                                             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '12px' }}>
                                                 <span className="material-icons spinning" style={{ fontSize: '32px' }}>refresh</span>
                                                 Syncing Registry Data...
@@ -1097,6 +1680,222 @@ export default function GenerateVouchers() {
                             }} style={{ flex: 2, padding: '16px', borderRadius: '16px', border: 'none', background: '#1a1c1e', color: '#fff', fontWeight: 950, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '10px' }}>
                                 <span className="material-icons">print</span> Start Printing (A4 Stacked)
                             </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Class-Wise Fee Demand & Statement Document Modal */}
+            {showClassWiseReportModal && (
+                <div style={{ position: 'fixed', inset: 0, background: 'rgba(15, 23, 42, 0.85)', backdropFilter: 'blur(10px)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1100, padding: '16px' }}>
+                    <div style={{ background: '#f8fafc', width: '100%', maxWidth: '1200px', maxHeight: '94vh', borderRadius: '28px', overflow: 'hidden', display: 'flex', flexDirection: 'column', boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.5)' }}>
+                        {/* Modal Header & Toolbar */}
+                        <div style={{ padding: '16px 24px', background: '#fff', borderBottom: '1px solid #e2e8f0', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '12px' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                                <div style={{ width: 40, height: 40, borderRadius: '12px', background: '#0284c7', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                                    <span className="material-icons" style={{ fontSize: '22px' }}>assessment</span>
+                                </div>
+                                <div>
+                                    <h3 style={{ margin: 0, fontSize: '1.15rem', fontWeight: 900, color: '#0f172a' }}>Class-Wise Fee Statement & Demand Document</h3>
+                                    <p style={{ margin: '2px 0 0 0', color: '#64748b', fontSize: '0.75rem', fontWeight: 600 }}>Official consolidated billing sheet grouped by class with subtotals & grand totals.</p>
+                                </div>
+                            </div>
+
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                    <label style={{ fontSize: '0.7rem', fontWeight: 800, color: '#475569', textTransform: 'uppercase' }}>Issue Date:</label>
+                                    <select 
+                                        value={reportIssueDate} 
+                                        onChange={e => {
+                                            setReportIssueDate(e.target.value);
+                                            generateClassWiseReportData(e.target.value, reportClassFilter);
+                                        }}
+                                        style={{ padding: '8px 12px', borderRadius: '10px', border: '1px solid #cbd5e1', fontWeight: 700, fontSize: '0.8rem', background: '#fff', color: '#0f172a', outline: 'none' }}
+                                    >
+                                        <option value="all">All Issued Dates ({allVouchers.length} Vouchers)</option>
+                                        {availableIssueDates.map(d => (
+                                            <option key={d.date} value={d.date}>
+                                                {formatDateStr(d.date)} ({d.count} Vouchers)
+                                            </option>
+                                        ))}
+                                    </select>
+                                </div>
+
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                    <label style={{ fontSize: '0.7rem', fontWeight: 800, color: '#475569', textTransform: 'uppercase' }}>Class:</label>
+                                    <select 
+                                        value={reportClassFilter} 
+                                        onChange={e => {
+                                            setReportClassFilter(e.target.value);
+                                            generateClassWiseReportData(reportIssueDate, e.target.value);
+                                        }}
+                                        style={{ padding: '8px 12px', borderRadius: '10px', border: '1px solid #cbd5e1', fontWeight: 700, fontSize: '0.8rem', background: '#fff', color: '#0f172a', outline: 'none' }}
+                                    >
+                                        <option value="all">All Classes</option>
+                                        {CLASSES.map(c => <option key={c} value={c}>{c}</option>)}
+                                    </select>
+                                </div>
+
+                                <button 
+                                    onClick={handlePrintClassWiseReport} 
+                                    style={{ padding: '10px 18px', borderRadius: '12px', background: '#0f172a', color: '#fff', fontWeight: 800, fontSize: '0.8rem', display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer', border: 'none', boxShadow: '0 2px 8px rgba(15, 23, 42, 0.2)' }}
+                                >
+                                    <span className="material-icons" style={{ fontSize: '18px' }}>print</span>
+                                    Print / Save PDF
+                                </button>
+
+                                <button 
+                                    onClick={() => setShowClassWiseReportModal(false)} 
+                                    style={{ background: '#f1f5f9', border: 'none', borderRadius: '50%', width: 36, height: 36, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#64748b' }}
+                                >
+                                    <span className="material-icons" style={{ fontSize: '20px' }}>close</span>
+                                </button>
+                            </div>
+                        </div>
+
+                        {/* Modal Document Body */}
+                        <div style={{ padding: '24px', overflowY: 'auto', flex: 1 }}>
+                            {reportLoading ? (
+                                <div style={{ padding: '60px', textAlign: 'center', color: '#64748b' }}>
+                                    <span className="material-icons spinning" style={{ fontSize: '36px', color: '#0284c7' }}>refresh</span>
+                                    <p style={{ marginTop: '12px', fontWeight: 700, fontSize: '0.9rem' }}>Compiling Class-Wise Statement & Vouchers...</p>
+                                </div>
+                            ) : classWiseReportData.length === 0 ? (
+                                <div style={{ padding: '60px', textAlign: 'center', background: '#fff', borderRadius: '16px', border: '1px dashed #cbd5e1' }}>
+                                    <span className="material-icons" style={{ fontSize: '48px', color: '#94a3b8' }}>description</span>
+                                    <h4 style={{ margin: '12px 0 4px 0', fontWeight: 800, color: '#1e293b' }}>No Vouchers Found</h4>
+                                    <p style={{ margin: 0, color: '#64748b', fontSize: '0.85rem' }}>No vouchers match the selected issue date ({reportIssueDate === 'all' ? 'All Dates' : formatDateStr(reportIssueDate)}) and class filter.</p>
+                                </div>
+                            ) : (
+                                <div id="class-wise-report-printable" style={{ background: '#fff', borderRadius: '16px', padding: '28px 32px', boxShadow: '0 4px 20px rgba(0,0,0,0.03)', border: '1px solid #e2e8f0', color: '#0f172a' }}>
+                                    {/* Document Header */}
+                                    <div className="report-header" style={{ textAlign: 'center', borderBottom: '2px solid #0f172a', paddingBottom: '12px', marginBottom: '16px' }}>
+                                        <h2 className="school-title" style={{ margin: 0, fontSize: '1.25rem', fontWeight: 900, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#0f172a' }}>
+                                            {settings?.school_name || 'WISDOM HOUSE EDUCATION SYSTEM'}
+                                        </h2>
+                                        <div className="report-subtitle" style={{ fontSize: '0.85rem', fontWeight: 800, color: '#334155', margin: '4px 0 8px 0', textTransform: 'uppercase' }}>
+                                            CLASS-WISE FEE DEMAND & ISSUED VOUCHERS STATEMENT
+                                        </div>
+                                        <div className="meta-bar" style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem', fontWeight: 700, color: '#475569', background: '#f8fafc', padding: '6px 12px', borderRadius: '6px', border: '1px solid #e2e8f0' }}>
+                                            <div><strong>Issue Date:</strong> {reportIssueDate === 'all' ? 'All Issued Dates' : formatDateStr(reportIssueDate)}</div>
+                                            <div><strong>Class Scope:</strong> {reportClassFilter === 'all' ? 'All Classes' : reportClassFilter}</div>
+                                            <div><strong>Total Students:</strong> {reportTotals.totalStudents}</div>
+                                            <div><strong>Printed:</strong> {new Date().toLocaleDateString('en-GB')} {new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div>
+                                        </div>
+                                    </div>
+
+                                    {/* Class Sections */}
+                                    {classWiseReportData.map((group) => (
+                                        <div key={group.className} className="class-section" style={{ marginBottom: '24px' }}>
+                                            <div className="class-title-banner" style={{ background: '#0f172a', color: '#fff', padding: '8px 12px', fontSize: '0.85rem', fontWeight: 900, display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderRadius: '6px 6px 0 0', textTransform: 'uppercase' }}>
+                                                <span>CLASS: {group.className}</span>
+                                                <span style={{ fontSize: '0.75rem', fontWeight: 700, background: 'rgba(255,255,255,0.15)', padding: '2px 8px', borderRadius: '4px' }}>
+                                                    {group.students.length} {group.students.length === 1 ? 'Student' : 'Students'}
+                                                </span>
+                                            </div>
+                                            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.75rem' }}>
+                                                <thead>
+                                                    <tr style={{ background: '#f1f5f9', textAlign: 'left', borderBottom: '1px solid #cbd5e1' }}>
+                                                        <th style={{ padding: '6px 8px', border: '1px solid #cbd5e1', width: '32px', textAlign: 'center' }}>#</th>
+                                                        <th style={{ padding: '6px 8px', border: '1px solid #cbd5e1', width: '80px' }}>Roll / ID</th>
+                                                        <th style={{ padding: '6px 8px', border: '1px solid #cbd5e1' }}>Student Name</th>
+                                                        <th style={{ padding: '6px 8px', border: '1px solid #cbd5e1' }}>Father Name</th>
+                                                        <th style={{ padding: '6px 8px', border: '1px solid #cbd5e1', textAlign: 'right', width: '90px' }}>Monthly Fee</th>
+                                                        <th style={{ padding: '6px 8px', border: '1px solid #cbd5e1' }}>Fee Months / Categories</th>
+                                                        <th style={{ padding: '6px 8px', border: '1px solid #cbd5e1', width: '120px' }}>Voucher (Slip #)</th>
+                                                        <th style={{ padding: '6px 8px', border: '1px solid #cbd5e1', textAlign: 'right', width: '90px' }}>Total Amount</th>
+                                                        <th style={{ padding: '6px 8px', border: '1px solid #cbd5e1', textAlign: 'right', width: '90px' }}>Due Amount</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody>
+                                                    {group.students.map((st: any, sIdx: number) => (
+                                                        <tr key={st.voucherId} style={{ background: sIdx % 2 === 0 ? '#ffffff' : '#fafafa' }}>
+                                                            <td style={{ padding: '6px 8px', border: '1px solid #e2e8f0', textAlign: 'center', fontWeight: 700, color: '#64748b' }}>{sIdx + 1}</td>
+                                                            <td style={{ padding: '6px 8px', border: '1px solid #e2e8f0', fontWeight: 800, color: '#0f172a' }}>{st.studentId}</td>
+                                                            <td style={{ padding: '6px 8px', border: '1px solid #e2e8f0', fontWeight: 800, color: '#0f172a' }}>{st.studentName}</td>
+                                                            <td style={{ padding: '6px 8px', border: '1px solid #e2e8f0', fontWeight: 600, color: '#334155' }}>{st.fatherName}</td>
+                                                            <td style={{ padding: '6px 8px', border: '1px solid #e2e8f0', textAlign: 'right', fontWeight: 700 }}>Rs {st.monthlyFee.toLocaleString()}</td>
+                                                            <td style={{ padding: '6px 8px', border: '1px solid #e2e8f0', fontWeight: 600, color: '#475569' }}>{st.monthsSummary}</td>
+                                                            <td style={{ padding: '6px 8px', border: '1px solid #e2e8f0', fontWeight: 700, color: '#0f172a' }}>
+                                                                {st.voucherNumber}
+                                                                {st.slipNo && <span style={{ marginLeft: '4px', fontSize: '0.7rem', color: '#0284c7', fontWeight: 800 }}>#{st.slipNo}</span>}
+                                                            </td>
+                                                            <td style={{ padding: '6px 8px', border: '1px solid #e2e8f0', textAlign: 'right', fontWeight: 800, color: '#0f172a' }}>Rs {st.voucherAmount.toLocaleString()}</td>
+                                                            <td style={{ padding: '6px 8px', border: '1px solid #e2e8f0', textAlign: 'right', fontWeight: 800 }}>
+                                                                {st.dueAmount === 0 ? (
+                                                                    <span style={{ color: '#16a34a' }}>PAID</span>
+                                                                ) : (
+                                                                    <span style={{ color: '#dc2626' }}>Rs {st.dueAmount.toLocaleString()}</span>
+                                                                )}
+                                                            </td>
+                                                        </tr>
+                                                    ))}
+                                                    {/* Subtotal Row */}
+                                                    <tr className="subtotal-row" style={{ background: '#f8fafc', fontWeight: 800, borderTop: '1.5px solid #0f172a', borderBottom: '1.5px solid #0f172a' }}>
+                                                        <td colSpan={4} style={{ padding: '6px 8px', border: '1px solid #cbd5e1', textTransform: 'uppercase', color: '#0f172a' }}>
+                                                            SUBTOTAL — {group.className} ({group.subtotal.count} Students)
+                                                        </td>
+                                                        <td style={{ padding: '6px 8px', border: '1px solid #cbd5e1', textAlign: 'right', color: '#0f172a' }}>
+                                                            Rs {group.subtotal.totalMonthlyFee.toLocaleString()}
+                                                        </td>
+                                                        <td style={{ padding: '6px 8px', border: '1px solid #cbd5e1', color: '#64748b' }}>-</td>
+                                                        <td style={{ padding: '6px 8px', border: '1px solid #cbd5e1', color: '#64748b' }}>-</td>
+                                                        <td style={{ padding: '6px 8px', border: '1px solid #cbd5e1', textAlign: 'right', color: '#0f172a' }}>
+                                                            Rs {group.subtotal.totalVoucherAmount.toLocaleString()}
+                                                        </td>
+                                                        <td style={{ padding: '6px 8px', border: '1px solid #cbd5e1', textAlign: 'right', color: '#dc2626' }}>
+                                                            Rs {group.subtotal.totalDue.toLocaleString()}
+                                                        </td>
+                                                    </tr>
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    ))}
+
+                                    {/* Grand Total Summary Box */}
+                                    <div className="grand-total-card" style={{ marginTop: '24px', border: '2px solid #0f172a', borderRadius: '8px', padding: '14px 18px', background: '#f8fafc' }}>
+                                        <div className="grand-total-title" style={{ fontSize: '0.85rem', fontWeight: 900, textTransform: 'uppercase', color: '#0f172a', borderBottom: '1px solid #cbd5e1', paddingBottom: '6px', marginBottom: '10px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                            <span>GRAND RECONCILIATION TOTALS (ALL CLASSES)</span>
+                                            <span style={{ fontSize: '0.75rem', fontWeight: 700, color: '#475569' }}>Scope: {reportTotals.totalClasses} Classes &bull; {reportTotals.totalStudents} Students</span>
+                                        </div>
+                                        <div className="grand-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: '10px', textAlign: 'center' }}>
+                                            <div className="grand-box" style={{ padding: '8px', background: '#fff', border: '1px solid #cbd5e1', borderRadius: '6px' }}>
+                                                <div className="grand-label" style={{ fontSize: '0.65rem', fontWeight: 800, color: '#64748b', textTransform: 'uppercase' }}>Total Classes</div>
+                                                <div className="grand-val" style={{ fontSize: '1rem', fontWeight: 900, color: '#0f172a', marginTop: '2px' }}>{reportTotals.totalClasses}</div>
+                                            </div>
+                                            <div className="grand-box" style={{ padding: '8px', background: '#fff', border: '1px solid #cbd5e1', borderRadius: '6px' }}>
+                                                <div className="grand-label" style={{ fontSize: '0.65rem', fontWeight: 800, color: '#64748b', textTransform: 'uppercase' }}>Total Students</div>
+                                                <div className="grand-val" style={{ fontSize: '1rem', fontWeight: 900, color: '#0f172a', marginTop: '2px' }}>{reportTotals.totalStudents}</div>
+                                            </div>
+                                            <div className="grand-box" style={{ padding: '8px', background: '#fff', border: '1px solid #cbd5e1', borderRadius: '6px' }}>
+                                                <div className="grand-label" style={{ fontSize: '0.65rem', fontWeight: 800, color: '#64748b', textTransform: 'uppercase' }}>Grand Monthly Fee</div>
+                                                <div className="grand-val" style={{ fontSize: '1rem', fontWeight: 900, color: '#0f172a', marginTop: '2px' }}>Rs {reportTotals.totalMonthlyFee.toLocaleString()}</div>
+                                            </div>
+                                            <div className="grand-box" style={{ padding: '8px', background: '#fff', border: '1px solid #cbd5e1', borderRadius: '6px' }}>
+                                                <div className="grand-label" style={{ fontSize: '0.65rem', fontWeight: 800, color: '#64748b', textTransform: 'uppercase' }}>Grand Voucher Total</div>
+                                                <div className="grand-val" style={{ fontSize: '1rem', fontWeight: 900, color: '#0f172a', marginTop: '2px' }}>Rs {reportTotals.totalVoucherAmount.toLocaleString()}</div>
+                                            </div>
+                                            <div className="grand-box" style={{ padding: '8px', background: '#fff', border: '2px solid #dc2626', borderRadius: '6px' }}>
+                                                <div className="grand-label" style={{ fontSize: '0.65rem', fontWeight: 800, color: '#dc2626', textTransform: 'uppercase' }}>TOTAL DUE AMOUNT</div>
+                                                <div className="grand-val grand-due" style={{ fontSize: '1.1rem', fontWeight: 950, color: '#dc2626', marginTop: '2px' }}>Rs {reportTotals.totalDueAmount.toLocaleString()}</div>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    {/* Signatures */}
+                                    <div className="signatures" style={{ display: 'flex', justifyContent: 'space-between', marginTop: '40px', paddingTop: '10px' }}>
+                                        <div className="sig-line" style={{ borderTop: '1px solid #0f172a', width: '150px', textAlign: 'center', fontSize: '0.75rem', fontWeight: 800, paddingTop: '4px' }}>
+                                            Prepared By
+                                        </div>
+                                        <div className="sig-line" style={{ borderTop: '1px solid #0f172a', width: '150px', textAlign: 'center', fontSize: '0.75rem', fontWeight: 800, paddingTop: '4px' }}>
+                                            Accounts Officer
+                                        </div>
+                                        <div className="sig-line" style={{ borderTop: '1px solid #0f172a', width: '150px', textAlign: 'center', fontSize: '0.75rem', fontWeight: 800, paddingTop: '4px' }}>
+                                            Principal / Incharge
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
                         </div>
                     </div>
                 </div>

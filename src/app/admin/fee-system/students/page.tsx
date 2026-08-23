@@ -61,9 +61,26 @@ export default function FeeManagementCenter() {
     const [categories, setCategories] = useState<any[]>([]);
     const [selectedFeeIds, setSelectedFeeIds] = useState<Set<string>>(new Set());
     
+    // Direct Settlement & Slip No States
+    const [showDirectPayModal, setShowDirectPayModal] = useState(false);
+    const [directPayFees, setDirectPayFees] = useState<any[]>([]);
+    const [directPaySlipNo, setDirectPaySlipNo] = useState('');
+    const [directPayMode, setDirectPayMode] = useState<'Cash' | 'Bank Transfer' | 'Cheque' | 'DD' | 'Online'>('Cash');
+    const [directPayDate, setDirectPayDate] = useState(new Date().toISOString().split('T')[0]);
+    const [directPayError, setDirectPayError] = useState('');
+
+    const [showEditSlipModal, setShowEditSlipModal] = useState(false);
+    const [slipFeeTarget, setSlipFeeTarget] = useState<any>(null);
+    const [slipInputVal, setSlipInputVal] = useState('');
+
+    const [showUpdateBaseFeeModal, setShowUpdateBaseFeeModal] = useState(false);
+    const [newBaseFee, setNewBaseFee] = useState<number>(0);
+
+    const [voucherFilterTab, setVoucherFilterTab] = useState<'all' | 'active' | 'old'>('all');
+
     // Modal States
     const [showAdjustmentModal, setShowAdjustmentModal] = useState(false);
-    const [adjustmentData, setAdjustmentData] = useState({ categoryId: '', amount: 0, month: new Date().toLocaleString('en-US', { month: 'long', year: 'numeric' }) });
+    const [adjustmentData, setAdjustmentData] = useState({ categoryId: '', amount: 0, month: new Date().toLocaleString('en-US', { month: 'long', year: 'numeric' }), slip_no: '' });
     const [showCollectPaymentModal, setShowCollectPaymentModal] = useState(false);
     const [paymentForm, setPaymentForm] = useState({
         voucherId: '',
@@ -329,8 +346,10 @@ export default function FeeManagementCenter() {
 
         const feesWithStatus = (fees || []).map(f => {
             const vItem = vItems?.find(vi => vi.student_fee_id === f.id);
+            const slip = f.slip_no || (f.notes?.startsWith('SLIP_NO:') ? f.notes.replace('SLIP_NO:', '') : '') || vItem?.fee_vouchers?.slip_no || '';
             return {
                 ...f,
+                slip_no: slip,
                 voucher: vItem?.fee_vouchers || null,
                 isPaid: vItem?.fee_vouchers?.status === 'paid'
             };
@@ -357,12 +376,13 @@ export default function FeeManagementCenter() {
         } : null);
     };
 
-    // Add Fee Adjustment
+    // Add Fee Adjustment with optional Slip No
     const handleAddAdjustment = async () => {
         if (!adjustmentData.categoryId || !adjustmentData.amount) return alert('Please select category and enter amount.');
         setIsProcessing(true);
         try {
-            const { error } = await supabase.from('student_fees').insert({
+            const cleanSlip = adjustmentData.slip_no ? adjustmentData.slip_no.trim() : '';
+            const feePayload: any = {
                 student_id: selectedStudent?.id,
                 fee_category_id: adjustmentData.categoryId,
                 amount: Number(adjustmentData.amount),
@@ -370,9 +390,16 @@ export default function FeeManagementCenter() {
                 class_name: selectedStudent?.grade,
                 is_assigned: true,
                 issue_date: new Date().toISOString()
-            });
+            };
+            if (cleanSlip) {
+                feePayload.slip_no = cleanSlip;
+                feePayload.notes = `SLIP_NO:${cleanSlip}`;
+            }
+
+            const { error } = await supabase.from('student_fees').insert(feePayload);
             if (!error) {
                 setShowAdjustmentModal(false);
+                setAdjustmentData({ categoryId: '', amount: 0, month: new Date().toLocaleString('en-US', { month: 'long', year: 'numeric' }), slip_no: '' });
                 if (selectedStudent) handleSelectStudent(selectedStudent);
                 fetchDirectory();
             }
@@ -383,69 +410,181 @@ export default function FeeManagementCenter() {
         }
     };
 
-    // Quick Mark Fee As Paid
-    const handleSetFeeAsPaid = async (fee: any) => {
-        if (!confirm(`Mark "${fee.fee_categories?.name || 'Fee'}" as paid?`)) return;
+    // Save/Update Slip No on individual fee record (old or new fee)
+    const handleSaveSlipNo = async (feeId: string, slipNo: string) => {
+        if (!feeId) return;
         setIsProcessing(true);
         try {
+            const cleanSlip = slipNo.trim();
+            // Try updating slip_no and notes
+            const { error } = await supabase.from('student_fees').update({
+                slip_no: cleanSlip,
+                notes: `SLIP_NO:${cleanSlip}`
+            }).eq('id', feeId);
+
+            if (error) {
+                await supabase.from('student_fees').update({
+                    notes: `SLIP_NO:${cleanSlip}`
+                }).eq('id', feeId);
+            }
+
+            setShowEditSlipModal(false);
+            setSlipFeeTarget(null);
+            setSlipInputVal('');
+            if (selectedStudent) handleSelectStudent(selectedStudent);
+            alert('Slip number updated successfully!');
+        } catch (e: any) {
+            alert('Error updating Slip No: ' + (e.message || e));
+        } finally {
+            setIsProcessing(false);
+        }
+    };
+
+    // Open Direct Payment Modal for selected fees (single or multiple months)
+    const handleOpenDirectPay = (feesList: any[]) => {
+        const unpaids = feesList.filter(f => !f.isPaid);
+        if (unpaids.length === 0) {
+            alert('The selected fee(s) are already paid.');
+            return;
+        }
+        setDirectPayFees(unpaids);
+        setDirectPaySlipNo(unpaids[0]?.slip_no || '');
+        setDirectPayError('');
+        setDirectPayMode('Cash');
+        setDirectPayDate(new Date().toISOString().split('T')[0]);
+        setShowDirectPayModal(true);
+    };
+
+    // Complete Direct Fee Settlement with Mandatory Slip No
+    const handleDirectPayWithSlip = async () => {
+        if (!selectedStudent || directPayFees.length === 0) return;
+        if (!directPaySlipNo.trim()) {
+            setDirectPayError('Slip No is required. Please enter a valid slip number before marking fee as paid.');
+            return;
+        }
+        setDirectPayError('');
+        setIsProcessing(true);
+        try {
+            const totalPay = directPayFees.reduce((acc, curr) => acc + Number(curr.amount || 0), 0);
+            const slipNum = directPaySlipNo.trim();
+
             const { data: sData } = await supabase.from('fee_settings').select('id, manual_prefix, manual_current_increment').single();
             const prefix = sData?.manual_prefix || 'MANUAL-';
             const currentInc = sData?.manual_current_increment || 1;
+            const vNum = `${prefix}${String(currentInc).padStart(5, '0')}`;
 
-            const { data: voucherItem } = await supabase.from('fee_voucher_items').select('voucher_id').eq('student_fee_id', fee.id).single();
-            if (voucherItem) {
-                const { data: v } = await supabase.from('fee_vouchers').select('*').eq('id', voucherItem.voucher_id).single();
-                if (v) {
-                    await supabase.from('fee_vouchers').update({ paid_amount: v.total_amount, status: 'paid' }).eq('id', v.id);
-                    await supabase.from('fee_payments').insert({
-                        voucher_id: v.id,
-                        student_id: fee.student_id,
-                        amount_paid: Number(v.total_amount) - Number(v.paid_amount || 0),
-                        payment_mode: 'Cash',
-                        payment_date: new Date().toISOString().split('T')[0],
-                        reference_number: 'DIRECT_SETTLEMENT'
-                    });
-                }
+            // Create paid fee voucher with slip_no
+            const voucherPayload: any = {
+                student_id: selectedStudent.id,
+                voucher_number: vNum,
+                total_amount: totalPay,
+                paid_amount: totalPay,
+                status: 'paid',
+                slip_no: slipNum,
+                issue_date: directPayDate || new Date().toISOString().split('T')[0],
+                due_date: directPayDate || new Date().toISOString().split('T')[0],
+                class_name: selectedStudent.grade
+            };
+
+            let effectiveVoucherId: string | null = null;
+            const { data: newV, error: vErr } = await supabase.from('fee_vouchers').insert(voucherPayload).select().single();
+            if (!vErr && newV) {
+                effectiveVoucherId = newV.id;
             } else {
-                const vNum = `${prefix}${String(currentInc).padStart(5, '0')}`;
-                const { data: newV } = await supabase.from('fee_vouchers').insert({
-                    student_id: fee.student_id,
-                    voucher_number: vNum,
-                    total_amount: fee.amount,
-                    paid_amount: fee.amount,
-                    status: 'paid',
-                    issue_date: new Date().toISOString(),
-                    due_date: new Date().toISOString(),
-                    class_name: selectedStudent?.grade
-                }).select().single();
+                // In case slip_no column is not directly in fee_vouchers table, insert without slip_no
+                delete voucherPayload.slip_no;
+                const { data: retryV } = await supabase.from('fee_vouchers').insert(voucherPayload).select().single();
+                if (retryV) effectiveVoucherId = retryV.id;
+            }
 
-                if (newV) {
+            // Link all selected student fees to this voucher & save slip_no
+            for (const fee of directPayFees) {
+                if (effectiveVoucherId) {
                     await supabase.from('fee_voucher_items').insert({
-                        voucher_id: newV.id,
+                        voucher_id: effectiveVoucherId,
                         student_fee_id: fee.id,
                         amount: fee.amount,
                         fee_category_id: fee.fee_category_id
                     });
-                    await supabase.from('fee_payments').insert({
-                        voucher_id: newV.id,
-                        student_id: fee.student_id,
-                        amount_paid: fee.amount,
-                        payment_mode: 'Cash',
-                        payment_date: new Date().toISOString().split('T')[0],
-                        reference_number: 'DIRECT_SETTLEMENT'
-                    });
-                    if (sData) {
-                        await supabase.from('fee_settings').update({ manual_current_increment: currentInc + 1 }).eq('id', sData.id);
+                }
+
+                // Update student_fees with slip_no
+                try {
+                    const { error: fErr } = await supabase.from('student_fees').update({
+                        slip_no: slipNum,
+                        notes: `SLIP_NO:${slipNum}`
+                    }).eq('id', fee.id);
+                    if (fErr) {
+                        await supabase.from('student_fees').update({
+                            notes: `SLIP_NO:${slipNum}`
+                        }).eq('id', fee.id);
                     }
+                } catch (err) {
+                    console.error('Update fee slip err:', err);
                 }
             }
+
+            // Insert Payment receipt record
+            await supabase.from('fee_payments').insert({
+                voucher_id: effectiveVoucherId,
+                student_id: selectedStudent.id,
+                amount_paid: totalPay,
+                payment_mode: directPayMode,
+                payment_date: directPayDate,
+                reference_number: slipNum
+            });
+
+            if (sData) {
+                await supabase.from('fee_settings').update({ manual_current_increment: currentInc + 1 }).eq('id', sData.id);
+            }
+
+            setShowDirectPayModal(false);
+            setDirectPayFees([]);
+            setDirectPaySlipNo('');
+            setSelectedFeeIds(new Set());
             if (selectedStudent) handleSelectStudent(selectedStudent);
             fetchDirectory();
-        } catch (e) {
-            console.error(e);
+            alert(`Fee marked as PAID directly with Slip #${slipNum}! New vouchers will exclude these paid fees.`);
+        } catch (e: any) {
+            alert('Error completing payment: ' + (e.message || e));
         } finally {
             setIsProcessing(false);
         }
+    };
+
+    // Update Base Tuition Fee for student (preserves old vouchers, applies to new vouchers)
+    const handleUpdateBaseFee = async () => {
+        if (!selectedStudent || newBaseFee < 0) return alert('Please enter a valid base fee amount.');
+        setIsProcessing(true);
+        try {
+            const { error } = await supabase
+                .from('students')
+                .update({ base_fee: Number(newBaseFee) })
+                .eq('id', selectedStudent.id);
+
+            if (error) throw error;
+
+            alert(`Base tuition fee updated to Rs ${Number(newBaseFee).toLocaleString()}! All old historical vouchers remain unchanged at their base fee, and newly generated vouchers will reflect this updated fee.`);
+            setShowUpdateBaseFeeModal(false);
+            if (selectedStudent) {
+                const updated = { 
+                    ...selectedStudent, 
+                    raw: { ...selectedStudent.raw, base_fee: Number(newBaseFee) } 
+                };
+                setSelectedStudent(updated);
+                handleSelectStudent(updated);
+            }
+            fetchDirectory();
+        } catch (err: any) {
+            alert('Error updating base fee: ' + (err.message || err));
+        } finally {
+            setIsProcessing(false);
+        }
+    };
+
+    // Quick Mark Fee As Paid (opens direct pay modal)
+    const handleSetFeeAsPaid = (fee: any) => {
+        handleOpenDirectPay([fee]);
     };
 
     // Record Payment
@@ -1120,7 +1259,7 @@ export default function FeeManagementCenter() {
                                                     <span style={{ fontSize: '0.8rem', color: '#64748b', fontWeight: 600 }}>Full Name</span>
                                                     <span style={{ fontSize: '0.85rem', color: '#0f172a', fontWeight: 800 }}>{selectedStudent.full_name}</span>
                                                 </div>
-                                                <div style={{ display: 'flex', justifyContent: 'space-between', borderBottom: '1px solid #e2e8f0', paddingBottom: '8px' }}>
+                                                 <div style={{ display: 'flex', justifyContent: 'space-between', borderBottom: '1px solid #e2e8f0', paddingBottom: '8px' }}>
                                                     <span style={{ fontSize: '0.8rem', color: '#64748b', fontWeight: 600 }}>Registration ID</span>
                                                     <span style={{ fontSize: '0.85rem', color: '#0284c7', fontWeight: 800 }}>{selectedStudent.student_id}</span>
                                                 </div>
@@ -1128,9 +1267,36 @@ export default function FeeManagementCenter() {
                                                     <span style={{ fontSize: '0.8rem', color: '#64748b', fontWeight: 600 }}>Current Grade / Class</span>
                                                     <span style={{ fontSize: '0.85rem', color: '#0f172a', fontWeight: 800 }}>{selectedStudent.grade}</span>
                                                 </div>
-                                                <div style={{ display: 'flex', justifyContent: 'space-between', borderBottom: '1px solid #e2e8f0', paddingBottom: '8px' }}>
-                                                    <span style={{ fontSize: '0.8rem', color: '#64748b', fontWeight: 600 }}>Base Tuition Fee</span>
-                                                    <span style={{ fontSize: '0.85rem', color: '#0f172a', fontWeight: 800 }}>Rs {Number(selectedStudent.raw?.base_fee || 0).toLocaleString()}</span>
+                                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid #e2e8f0', paddingBottom: '8px' }}>
+                                                    <div>
+                                                        <span style={{ fontSize: '0.8rem', color: '#64748b', fontWeight: 600, display: 'block' }}>Base Tuition Fee</span>
+                                                        <span style={{ fontSize: '0.65rem', color: '#94a3b8' }}>Old vouchers stay fixed; new vouchers take updated fee</span>
+                                                    </div>
+                                                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                                        <span style={{ fontSize: '0.9rem', color: '#0f172a', fontWeight: 900 }}>Rs {Number(selectedStudent.raw?.base_fee || 0).toLocaleString()}</span>
+                                                        <button
+                                                            onClick={() => {
+                                                                setNewBaseFee(Number(selectedStudent.raw?.base_fee || 0));
+                                                                setShowUpdateBaseFeeModal(true);
+                                                            }}
+                                                            style={{
+                                                                padding: '4px 10px',
+                                                                borderRadius: '8px',
+                                                                border: '1px solid #cbd5e1',
+                                                                background: '#fff',
+                                                                color: '#0f172a',
+                                                                fontWeight: 800,
+                                                                fontSize: '0.7rem',
+                                                                cursor: 'pointer',
+                                                                display: 'flex',
+                                                                alignItems: 'center',
+                                                                gap: '4px'
+                                                            }}
+                                                            title="Update Base Fee for new vouchers"
+                                                        >
+                                                            <span className="material-icons" style={{ fontSize: '14px' }}>edit</span> Update Fee
+                                                        </button>
+                                                    </div>
                                                 </div>
                                                 <div style={{ display: 'flex', justifyContent: 'space-between', paddingBottom: '4px' }}>
                                                     <span style={{ fontSize: '0.8rem', color: '#64748b', fontWeight: 600 }}>Status</span>
@@ -1166,39 +1332,123 @@ export default function FeeManagementCenter() {
                                 {/* TAB 2: FEES & CHARGES */}
                                 {activeTab === 'fees' && (
                                     <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
-                                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                                            <h4 style={{ margin: 0, fontWeight: 800, fontSize: '1rem', color: '#0f172a' }}>Assigned Fees & Charges</h4>
-                                            <button onClick={() => setShowAdjustmentModal(true)} style={{ padding: '8px 16px', borderRadius: '10px', border: 'none', background: '#0f172a', color: '#fff', fontWeight: 800, fontSize: '0.75rem', cursor: 'pointer' }}>
-                                                + Add Fee Item
-                                            </button>
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '12px' }}>
+                                            <div>
+                                                <h4 style={{ margin: 0, fontWeight: 800, fontSize: '1rem', color: '#0f172a' }}>Assigned Fees & Charges</h4>
+                                                <p style={{ margin: '2px 0 0 0', fontSize: '0.75rem', color: '#64748b' }}>Select unpaid month(s) and directly settle by adding mandatory Slip No</p>
+                                            </div>
+                                            <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                                                {selectedFeeIds.size > 0 && (
+                                                    <button
+                                                        onClick={() => {
+                                                            const selectedList = studentFees.filter(f => selectedFeeIds.has(f.id));
+                                                            handleOpenDirectPay(selectedList);
+                                                        }}
+                                                        style={{
+                                                            padding: '8px 16px',
+                                                            borderRadius: '10px',
+                                                            border: 'none',
+                                                            background: '#16a34a',
+                                                            color: '#fff',
+                                                            fontWeight: 800,
+                                                            fontSize: '0.75rem',
+                                                            cursor: 'pointer',
+                                                            display: 'flex',
+                                                            alignItems: 'center',
+                                                            gap: '6px'
+                                                        }}
+                                                    >
+                                                        <span className="material-icons" style={{ fontSize: '16px' }}>check_circle</span>
+                                                        Pay Selected ({selectedFeeIds.size}) with Slip No
+                                                    </button>
+                                                )}
+                                                <button onClick={() => setShowAdjustmentModal(true)} style={{ padding: '8px 16px', borderRadius: '10px', border: 'none', background: '#0f172a', color: '#fff', fontWeight: 800, fontSize: '0.75rem', cursor: 'pointer' }}>
+                                                    + Add Fee Item
+                                                </button>
+                                            </div>
                                         </div>
 
                                         <div style={{ borderRadius: '16px', border: '1px solid #e2e8f0', overflow: 'hidden' }}>
                                             <table style={{ width: '100%', borderCollapse: 'collapse' }}>
                                                 <thead>
                                                     <tr style={{ background: '#f8fafc', textAlign: 'left', borderBottom: '1px solid #e2e8f0' }}>
-                                                        <th style={{ padding: '12px 20px', fontSize: '0.65rem', fontWeight: 800, color: '#64748b', textTransform: 'uppercase' }}>Description / Category</th>
-                                                        <th style={{ padding: '12px 20px', fontSize: '0.65rem', fontWeight: 800, color: '#64748b', textTransform: 'uppercase' }}>Billing Month</th>
-                                                        <th style={{ padding: '12px 20px', fontSize: '0.65rem', fontWeight: 800, color: '#64748b', textTransform: 'uppercase' }}>Amount</th>
-                                                        <th style={{ padding: '12px 20px', fontSize: '0.65rem', fontWeight: 800, color: '#64748b', textTransform: 'uppercase' }}>Settlement Status</th>
-                                                        <th style={{ padding: '12px 20px', fontSize: '0.65rem', fontWeight: 800, color: '#64748b', textTransform: 'uppercase', textAlign: 'right' }}>Actions</th>
+                                                        <th style={{ padding: '12px 16px', width: '40px' }}>
+                                                            <input
+                                                                type="checkbox"
+                                                                checked={studentFees.filter(f => !f.isPaid).length > 0 && studentFees.filter(f => !f.isPaid).every(f => selectedFeeIds.has(f.id))}
+                                                                onChange={e => {
+                                                                    if (e.target.checked) {
+                                                                        const unpaidIds = studentFees.filter(f => !f.isPaid).map(f => f.id);
+                                                                        setSelectedFeeIds(new Set(unpaidIds));
+                                                                    } else {
+                                                                        setSelectedFeeIds(new Set());
+                                                                    }
+                                                                }}
+                                                                style={{ cursor: 'pointer' }}
+                                                            />
+                                                        </th>
+                                                        <th style={{ padding: '12px 16px', fontSize: '0.65rem', fontWeight: 800, color: '#64748b', textTransform: 'uppercase' }}>Description / Category</th>
+                                                        <th style={{ padding: '12px 16px', fontSize: '0.65rem', fontWeight: 800, color: '#64748b', textTransform: 'uppercase' }}>Billing Month</th>
+                                                        <th style={{ padding: '12px 16px', fontSize: '0.65rem', fontWeight: 800, color: '#64748b', textTransform: 'uppercase' }}>Amount</th>
+                                                        <th style={{ padding: '12px 16px', fontSize: '0.65rem', fontWeight: 800, color: '#64748b', textTransform: 'uppercase' }}>Slip No</th>
+                                                        <th style={{ padding: '12px 16px', fontSize: '0.65rem', fontWeight: 800, color: '#64748b', textTransform: 'uppercase' }}>Settlement Status</th>
+                                                        <th style={{ padding: '12px 16px', fontSize: '0.65rem', fontWeight: 800, color: '#64748b', textTransform: 'uppercase', textAlign: 'right' }}>Actions</th>
                                                     </tr>
                                                 </thead>
                                                 <tbody>
                                                     {studentFees.length === 0 ? (
-                                                        <tr><td colSpan={5} style={{ padding: '32px', textAlign: 'center', color: '#64748b' }}>No fee assignments found.</td></tr>
+                                                        <tr><td colSpan={7} style={{ padding: '32px', textAlign: 'center', color: '#64748b' }}>No fee assignments found.</td></tr>
                                                     ) : (
                                                         studentFees.map(f => (
                                                             <tr key={f.id} style={{ borderBottom: '1px solid #f1f5f9', background: f.isPaid ? '#f0fdf4' : 'transparent' }}>
-                                                                <td style={{ padding: '12px 20px' }}>
+                                                                <td style={{ padding: '12px 16px' }}>
+                                                                    {!f.isPaid ? (
+                                                                        <input
+                                                                            type="checkbox"
+                                                                            checked={selectedFeeIds.has(f.id)}
+                                                                            onChange={e => {
+                                                                                const next = new Set(selectedFeeIds);
+                                                                                if (e.target.checked) next.add(f.id);
+                                                                                else next.delete(f.id);
+                                                                                setSelectedFeeIds(next);
+                                                                            }}
+                                                                            style={{ cursor: 'pointer' }}
+                                                                        />
+                                                                    ) : (
+                                                                        <span className="material-icons" style={{ fontSize: '18px', color: '#16a34a' }}>check_circle</span>
+                                                                    )}
+                                                                </td>
+                                                                <td style={{ padding: '12px 16px' }}>
                                                                     <div style={{ fontWeight: 800, color: '#0f172a', fontSize: '0.85rem' }}>{f.fee_categories?.name || 'Academic Charge'}</div>
                                                                     <div style={{ fontSize: '0.7rem', color: '#94a3b8' }}>ID: {f.id.slice(0, 8).toUpperCase()}</div>
                                                                 </td>
-                                                                <td style={{ padding: '12px 20px', fontWeight: 700, fontSize: '0.8rem', color: '#475569' }}>{f.month}</td>
-                                                                <td style={{ padding: '12px 20px', fontWeight: 900, fontSize: '0.85rem', color: f.isPaid ? '#15803d' : '#0f172a' }}>
+                                                                <td style={{ padding: '12px 16px', fontWeight: 700, fontSize: '0.8rem', color: '#475569' }}>{f.month}</td>
+                                                                <td style={{ padding: '12px 16px', fontWeight: 900, fontSize: '0.85rem', color: f.isPaid ? '#15803d' : '#0f172a' }}>
                                                                     Rs {Number(f.amount).toLocaleString()}
                                                                 </td>
-                                                                <td style={{ padding: '12px 20px' }}>
+                                                                <td style={{ padding: '12px 16px' }}>
+                                                                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                                                        {f.slip_no ? (
+                                                                            <span style={{ fontSize: '0.75rem', fontWeight: 800, background: '#eff6ff', color: '#1d4ed8', padding: '2px 8px', borderRadius: '6px', border: '1px solid #bfdbfe' }}>
+                                                                                #{f.slip_no}
+                                                                            </span>
+                                                                        ) : (
+                                                                            <span style={{ fontSize: '0.7rem', color: '#94a3b8', fontStyle: 'italic' }}>None</span>
+                                                                        )}
+                                                                        <button
+                                                                            onClick={() => {
+                                                                                setSlipFeeTarget(f);
+                                                                                setSlipInputVal(f.slip_no || '');
+                                                                                setShowEditSlipModal(true);
+                                                                            }}
+                                                                            style={{ border: 'none', background: 'transparent', cursor: 'pointer', padding: '2px', color: '#64748b' }}
+                                                                            title="Edit / Set Slip No"
+                                                                        >
+                                                                            <span className="material-icons" style={{ fontSize: '15px' }}>edit</span>
+                                                                        </button>
+                                                                    </div>
+                                                                </td>
+                                                                <td style={{ padding: '12px 16px' }}>
                                                                     <span style={{
                                                                         fontSize: '0.65rem',
                                                                         fontWeight: 800,
@@ -1210,23 +1460,27 @@ export default function FeeManagementCenter() {
                                                                         {f.isPaid ? 'PAID' : 'PENDING'}
                                                                     </span>
                                                                 </td>
-                                                                <td style={{ padding: '12px 20px', textAlign: 'right' }}>
+                                                                <td style={{ padding: '12px 16px', textAlign: 'right' }}>
                                                                     {!f.isPaid ? (
                                                                         <button
-                                                                            onClick={() => handleSetFeeAsPaid(f)}
+                                                                            onClick={() => handleOpenDirectPay([f])}
                                                                             disabled={isProcessing}
                                                                             style={{
                                                                                 padding: '6px 12px',
                                                                                 borderRadius: '8px',
                                                                                 border: 'none',
-                                                                                background: '#0f172a',
+                                                                                background: '#16a34a',
                                                                                 color: '#fff',
                                                                                 fontSize: '0.7rem',
                                                                                 fontWeight: 800,
-                                                                                cursor: 'pointer'
+                                                                                cursor: 'pointer',
+                                                                                display: 'inline-flex',
+                                                                                alignItems: 'center',
+                                                                                gap: '4px'
                                                                             }}
                                                                         >
-                                                                            Mark Paid
+                                                                            <span className="material-icons" style={{ fontSize: '14px' }}>payment</span>
+                                                                            Pay (Slip)
                                                                         </button>
                                                                     ) : (
                                                                         <span style={{ fontSize: '0.75rem', color: '#16a34a', fontWeight: 800 }}>Settled</span>
@@ -1244,8 +1498,36 @@ export default function FeeManagementCenter() {
                                 {/* TAB 3: VOUCHERS */}
                                 {activeTab === 'vouchers' && (
                                     <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
-                                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                                            <h4 style={{ margin: 0, fontWeight: 800, fontSize: '1rem', color: '#0f172a' }}>Generated Fee Vouchers</h4>
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '12px' }}>
+                                            <div>
+                                                <h4 style={{ margin: 0, fontWeight: 800, fontSize: '1rem', color: '#0f172a' }}>Generated Fee Vouchers</h4>
+                                                <p style={{ margin: '2px 0 0 0', fontSize: '0.75rem', color: '#64748b' }}>Vouchers past their due date are moved to the Old Vouchers archive</p>
+                                            </div>
+                                            {/* Sub-tabs for All / Active / Old Past Due */}
+                                            <div style={{ display: 'flex', gap: '6px', background: '#f1f5f9', padding: '4px', borderRadius: '10px' }}>
+                                                {[
+                                                    { id: 'all', label: 'All Vouchers', count: studentVouchers.length },
+                                                    { id: 'active', label: 'Active', count: studentVouchers.filter(v => v.status !== 'paid' && (!v.due_date || v.due_date >= new Date().toISOString().split('T')[0])).length },
+                                                    { id: 'old', label: 'Old (Past Due)', count: studentVouchers.filter(v => (v.due_date && v.due_date < new Date().toISOString().split('T')[0]) || v.status === 'overdue').length },
+                                                ].map(t => (
+                                                    <button
+                                                        key={t.id}
+                                                        onClick={() => setVoucherFilterTab(t.id as any)}
+                                                        style={{
+                                                            padding: '6px 12px',
+                                                            borderRadius: '8px',
+                                                            border: 'none',
+                                                            background: voucherFilterTab === t.id ? '#0f172a' : 'transparent',
+                                                            color: voucherFilterTab === t.id ? '#fff' : '#64748b',
+                                                            fontWeight: 800,
+                                                            fontSize: '0.7rem',
+                                                            cursor: 'pointer'
+                                                        }}
+                                                    >
+                                                        {t.label} ({t.count})
+                                                    </button>
+                                                ))}
+                                            </div>
                                         </div>
 
                                         <div style={{ borderRadius: '16px', border: '1px solid #e2e8f0', overflow: 'hidden' }}>
@@ -1253,6 +1535,7 @@ export default function FeeManagementCenter() {
                                                 <thead>
                                                     <tr style={{ background: '#f8fafc', textAlign: 'left', borderBottom: '1px solid #e2e8f0' }}>
                                                         <th style={{ padding: '12px 20px', fontSize: '0.65rem', fontWeight: 800, color: '#64748b', textTransform: 'uppercase' }}>Voucher No</th>
+                                                        <th style={{ padding: '12px 20px', fontSize: '0.65rem', fontWeight: 800, color: '#64748b', textTransform: 'uppercase' }}>Slip No</th>
                                                         <th style={{ padding: '12px 20px', fontSize: '0.65rem', fontWeight: 800, color: '#64748b', textTransform: 'uppercase' }}>Issue Date</th>
                                                         <th style={{ padding: '12px 20px', fontSize: '0.65rem', fontWeight: 800, color: '#64748b', textTransform: 'uppercase' }}>Due Date</th>
                                                         <th style={{ padding: '12px 20px', fontSize: '0.65rem', fontWeight: 800, color: '#64748b', textTransform: 'uppercase' }}>Total Amount</th>
@@ -1262,52 +1545,82 @@ export default function FeeManagementCenter() {
                                                     </tr>
                                                 </thead>
                                                 <tbody>
-                                                    {studentVouchers.length === 0 ? (
-                                                        <tr><td colSpan={7} style={{ padding: '32px', textAlign: 'center', color: '#64748b' }}>No vouchers generated for this student yet.</td></tr>
-                                                    ) : (
-                                                        studentVouchers.map(v => (
-                                                            <tr key={v.id} style={{ borderBottom: '1px solid #f1f5f9' }}>
-                                                                <td style={{ padding: '12px 20px', fontWeight: 900, color: '#0f172a', fontSize: '0.85rem' }}>{v.voucher_number}</td>
-                                                                <td style={{ padding: '12px 20px', fontWeight: 600, fontSize: '0.8rem', color: '#475569' }}>{v.issue_date ? new Date(v.issue_date).toLocaleDateString() : 'N/A'}</td>
-                                                                <td style={{ padding: '12px 20px', fontWeight: 700, fontSize: '0.8rem', color: '#dc2626' }}>{v.due_date ? new Date(v.due_date).toLocaleDateString() : 'N/A'}</td>
-                                                                <td style={{ padding: '12px 20px', fontWeight: 900, fontSize: '0.85rem', color: '#0f172a' }}>Rs {Number(v.total_amount).toLocaleString()}</td>
-                                                                <td style={{ padding: '12px 20px', fontWeight: 800, fontSize: '0.85rem', color: '#16a34a' }}>Rs {Number(v.paid_amount || 0).toLocaleString()}</td>
-                                                                <td style={{ padding: '12px 20px' }}>
-                                                                    <span style={{
-                                                                        fontSize: '0.65rem',
-                                                                        fontWeight: 800,
-                                                                        padding: '3px 8px',
-                                                                        borderRadius: '6px',
-                                                                        background: v.status === 'paid' ? '#dcfce7' : (v.status === 'overdue' ? '#fee2e2' : '#fef9c3'),
-                                                                        color: v.status === 'paid' ? '#15803d' : (v.status === 'overdue' ? '#b91c1c' : '#854d0e'),
-                                                                        textTransform: 'uppercase'
-                                                                    }}>
-                                                                        {v.status}
-                                                                    </span>
-                                                                </td>
-                                                                <td style={{ padding: '12px 20px', textAlign: 'right' }}>
-                                                                    <button
-                                                                        onClick={() => handleOpenVoucherSlip(v)}
-                                                                        style={{
-                                                                            padding: '6px 14px',
-                                                                            borderRadius: '8px',
-                                                                            border: '1px solid #e2e8f0',
-                                                                            background: '#fff',
-                                                                            color: '#0f172a',
+                                                    {(() => {
+                                                        const todayStr = new Date().toISOString().split('T')[0];
+                                                        const filtered = studentVouchers.filter(v => {
+                                                            if (voucherFilterTab === 'active') {
+                                                                return v.status !== 'paid' && (!v.due_date || v.due_date >= todayStr);
+                                                            }
+                                                            if (voucherFilterTab === 'old') {
+                                                                return (v.due_date && v.due_date < todayStr) || v.status === 'overdue';
+                                                            }
+                                                            return true;
+                                                        });
+
+                                                        if (filtered.length === 0) {
+                                                            return <tr><td colSpan={8} style={{ padding: '32px', textAlign: 'center', color: '#64748b' }}>No vouchers found in this filter category.</td></tr>;
+                                                        }
+
+                                                        return filtered.map(v => {
+                                                            const isPastDue = v.due_date && v.due_date < todayStr;
+                                                            return (
+                                                                <tr key={v.id} style={{ borderBottom: '1px solid #f1f5f9', background: isPastDue && v.status !== 'paid' ? '#fff1f2' : 'transparent' }}>
+                                                                    <td style={{ padding: '12px 20px', fontWeight: 900, color: '#0f172a', fontSize: '0.85rem' }}>{v.voucher_number}</td>
+                                                                    <td style={{ padding: '12px 20px' }}>
+                                                                        {v.slip_no ? (
+                                                                            <span style={{ fontSize: '0.75rem', fontWeight: 800, background: '#eff6ff', color: '#1d4ed8', padding: '2px 8px', borderRadius: '6px', border: '1px solid #bfdbfe' }}>
+                                                                                #{v.slip_no}
+                                                                            </span>
+                                                                        ) : (
+                                                                            <span style={{ fontSize: '0.7rem', color: '#94a3b8' }}>-</span>
+                                                                        )}
+                                                                    </td>
+                                                                    <td style={{ padding: '12px 20px', fontWeight: 600, fontSize: '0.8rem', color: '#475569' }}>{v.issue_date ? new Date(v.issue_date).toLocaleDateString() : 'N/A'}</td>
+                                                                    <td style={{ padding: '12px 20px', fontWeight: 700, fontSize: '0.8rem', color: isPastDue ? '#dc2626' : '#475569' }}>
+                                                                        {v.due_date ? new Date(v.due_date).toLocaleDateString() : 'N/A'}
+                                                                        {isPastDue && v.status !== 'paid' && (
+                                                                            <span style={{ marginLeft: '6px', fontSize: '0.65rem', background: '#fee2e2', color: '#b91c1c', padding: '2px 6px', borderRadius: '4px', fontWeight: 800 }}>OLD / EXPIRED</span>
+                                                                        )}
+                                                                    </td>
+                                                                    <td style={{ padding: '12px 20px', fontWeight: 900, fontSize: '0.85rem', color: '#0f172a' }}>Rs {Number(v.total_amount).toLocaleString()}</td>
+                                                                    <td style={{ padding: '12px 20px', fontWeight: 800, fontSize: '0.85rem', color: '#16a34a' }}>Rs {Number(v.paid_amount || 0).toLocaleString()}</td>
+                                                                    <td style={{ padding: '12px 20px' }}>
+                                                                        <span style={{
+                                                                            fontSize: '0.65rem',
                                                                             fontWeight: 800,
-                                                                            fontSize: '0.75rem',
-                                                                            cursor: 'pointer',
-                                                                            display: 'inline-flex',
-                                                                            alignItems: 'center',
-                                                                            gap: '6px'
-                                                                        }}
-                                                                    >
-                                                                        <span className="material-icons" style={{ fontSize: '16px' }}>print</span> View & Print
-                                                                    </button>
-                                                                </td>
-                                                            </tr>
-                                                        ))
-                                                    )}
+                                                                            padding: '3px 8px',
+                                                                            borderRadius: '6px',
+                                                                            background: v.status === 'paid' ? '#dcfce7' : (v.status === 'overdue' || isPastDue ? '#fee2e2' : '#fef9c3'),
+                                                                            color: v.status === 'paid' ? '#15803d' : (v.status === 'overdue' || isPastDue ? '#b91c1c' : '#854d0e'),
+                                                                            textTransform: 'uppercase'
+                                                                        }}>
+                                                                            {v.status}
+                                                                        </span>
+                                                                    </td>
+                                                                    <td style={{ padding: '12px 20px', textAlign: 'right' }}>
+                                                                        <button
+                                                                            onClick={() => handleOpenVoucherSlip(v)}
+                                                                            style={{
+                                                                                padding: '6px 14px',
+                                                                                borderRadius: '8px',
+                                                                                border: '1px solid #e2e8f0',
+                                                                                background: '#fff',
+                                                                                color: '#0f172a',
+                                                                                fontWeight: 800,
+                                                                                fontSize: '0.75rem',
+                                                                                cursor: 'pointer',
+                                                                                display: 'inline-flex',
+                                                                                alignItems: 'center',
+                                                                                gap: '6px'
+                                                                            }}
+                                                                        >
+                                                                            <span className="material-icons" style={{ fontSize: '16px' }}>print</span> View & Print
+                                                                        </button>
+                                                                    </td>
+                                                                </tr>
+                                                            );
+                                                        });
+                                                    })()}
                                                 </tbody>
                                             </table>
                                         </div>
@@ -1691,6 +2004,16 @@ export default function FeeManagementCenter() {
                                     />
                                 </div>
 
+                                <div>
+                                    <label style={{ fontSize: '0.7rem', fontWeight: 800, color: '#64748b', textTransform: 'uppercase', display: 'block', marginBottom: '6px' }}>Slip No (Manual Slip Number)</label>
+                                    <input
+                                        placeholder="e.g. SLIP-2024-001 or 98234"
+                                        value={adjustmentData.slip_no || ''}
+                                        onChange={e => setAdjustmentData(p => ({ ...p, slip_no: e.target.value }))}
+                                        style={{ width: '100%', padding: '12px', borderRadius: '12px', border: '1.5px solid #cbd5e1', fontWeight: 700, outline: 'none' }}
+                                    />
+                                </div>
+
                                 <button
                                     onClick={handleAddAdjustment}
                                     disabled={isProcessing}
@@ -1707,6 +2030,214 @@ export default function FeeManagementCenter() {
                                     }}
                                 >
                                     {isProcessing ? 'Saving...' : 'Add Fee to Account'}
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                )}
+
+                {/* DIRECT FEE PAYMENT WITH MANDATORY SLIP NO MODAL */}
+                {showDirectPayModal && selectedStudent && (
+                    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.65)', backdropFilter: 'blur(8px)', display: 'flex', justifyContent: 'center', alignItems: 'center', zIndex: 1150 }}>
+                        <div style={{ background: '#fff', width: '90%', maxWidth: '520px', borderRadius: '24px', padding: '32px', boxShadow: '0 20px 50px rgba(0,0,0,0.2)' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+                                <div>
+                                    <h3 style={{ margin: 0, fontSize: '1.2rem', fontWeight: 900, color: '#0f172a' }}>Direct Fee Settlement</h3>
+                                    <p style={{ margin: '2px 0 0 0', fontSize: '0.75rem', color: '#64748b', fontWeight: 600 }}>Mark selected month(s) as paid directly with mandatory Slip No</p>
+                                </div>
+                                <button onClick={() => setShowDirectPayModal(false)} style={{ border: 'none', background: '#f1f5f9', borderRadius: '10px', width: 36, height: 36, cursor: 'pointer', color: '#64748b' }}>
+                                    <span className="material-icons">close</span>
+                                </button>
+                            </div>
+
+                            {/* Selected Items Summary */}
+                            <div style={{ background: '#f8fafc', padding: '16px', borderRadius: '16px', border: '1px solid #e2e8f0', marginBottom: '16px' }}>
+                                <div style={{ fontSize: '0.7rem', fontWeight: 800, color: '#64748b', textTransform: 'uppercase', marginBottom: '8px' }}>Selected Months / Fees ({directPayFees.length}):</div>
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', maxHeight: '120px', overflowY: 'auto' }}>
+                                    {directPayFees.map(f => (
+                                        <div key={f.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem', fontWeight: 700, color: '#334155' }}>
+                                            <span>• {f.fee_categories?.name || 'Fee'} ({f.month})</span>
+                                            <span style={{ fontWeight: 900, color: '#0f172a' }}>Rs {Number(f.amount).toLocaleString()}</span>
+                                        </div>
+                                    ))}
+                                </div>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', borderTop: '1px solid #cbd5e1', paddingTop: '10px', marginTop: '10px' }}>
+                                    <span style={{ fontSize: '0.85rem', fontWeight: 800, color: '#0f172a' }}>Total Payment</span>
+                                    <span style={{ fontSize: '1.1rem', fontWeight: 900, color: '#16a34a' }}>Rs {directPayFees.reduce((acc, curr) => acc + Number(curr.amount || 0), 0).toLocaleString()}</span>
+                                </div>
+                            </div>
+
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+                                <div>
+                                    <label style={{ fontSize: '0.7rem', fontWeight: 800, color: '#dc2626', textTransform: 'uppercase', display: 'flex', alignItems: 'center', gap: '4px', marginBottom: '6px' }}>
+                                        <span className="material-icons" style={{ fontSize: '14px' }}>pin</span> Slip Number (Mandatory *)
+                                    </label>
+                                    <input
+                                        placeholder="Enter manual slip number (e.g. 10452 or SLIP-FEB-01)..."
+                                        value={directPaySlipNo}
+                                        onChange={e => setDirectPaySlipNo(e.target.value)}
+                                        style={{ width: '100%', padding: '12px', borderRadius: '12px', border: directPayError ? '2px solid #dc2626' : '1.5px solid #0f172a', fontWeight: 800, fontSize: '0.95rem', outline: 'none', background: '#f8fafc' }}
+                                        autoFocus
+                                    />
+                                    {directPayError && (
+                                        <div style={{ fontSize: '0.75rem', fontWeight: 700, color: '#dc2626', marginTop: '4px' }}>
+                                            {directPayError}
+                                        </div>
+                                    )}
+                                </div>
+
+                                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+                                    <div>
+                                        <label style={{ fontSize: '0.7rem', fontWeight: 800, color: '#64748b', textTransform: 'uppercase', display: 'block', marginBottom: '6px' }}>Payment Mode</label>
+                                        <select
+                                            value={directPayMode}
+                                            onChange={e => setDirectPayMode(e.target.value as any)}
+                                            style={{ width: '100%', padding: '12px', borderRadius: '12px', border: '1.5px solid #cbd5e1', fontWeight: 700, outline: 'none' }}
+                                        >
+                                            <option value="Cash">Cash</option>
+                                            <option value="Bank Transfer">Bank Transfer</option>
+                                            <option value="Cheque">Cheque</option>
+                                            <option value="Online">Online</option>
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label style={{ fontSize: '0.7rem', fontWeight: 800, color: '#64748b', textTransform: 'uppercase', display: 'block', marginBottom: '6px' }}>Payment Date</label>
+                                        <input
+                                            type="date"
+                                            value={directPayDate}
+                                            onChange={e => setDirectPayDate(e.target.value)}
+                                            style={{ width: '100%', padding: '12px', borderRadius: '12px', border: '1.5px solid #cbd5e1', fontWeight: 700, outline: 'none' }}
+                                        />
+                                    </div>
+                                </div>
+
+                                <div style={{ background: '#ecfdf5', padding: '10px 14px', borderRadius: '10px', border: '1px solid #a7f3d0', fontSize: '0.75rem', color: '#065f46', fontWeight: 600 }}>
+                                    ✓ This directly sets the selected fee(s) as <strong>PAID</strong> and attaches Slip #{directPaySlipNo || '...'}.<br />
+                                    ✓ Future voucher generation will <strong>exclude</strong> these settled fees.
+                                </div>
+
+                                <button
+                                    onClick={handleDirectPayWithSlip}
+                                    disabled={isProcessing}
+                                    style={{
+                                        marginTop: '6px',
+                                        padding: '14px',
+                                        borderRadius: '12px',
+                                        border: 'none',
+                                        background: '#16a34a',
+                                        color: '#fff',
+                                        fontWeight: 900,
+                                        fontSize: '0.9rem',
+                                        cursor: 'pointer',
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        justifyContent: 'center',
+                                        gap: '8px'
+                                    }}
+                                >
+                                    <span className="material-icons">check_circle</span>
+                                    {isProcessing ? 'Recording Settlement...' : 'Mark Directly as PAID with Slip No'}
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                )}
+
+                {/* EDIT / SET SLIP NO MODAL (FOR OLD & NEW FEES) */}
+                {showEditSlipModal && slipFeeTarget && (
+                    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.65)', backdropFilter: 'blur(8px)', display: 'flex', justifyContent: 'center', alignItems: 'center', zIndex: 1200 }}>
+                        <div style={{ background: '#fff', width: '90%', maxWidth: '420px', borderRadius: '24px', padding: '28px', boxShadow: '0 20px 50px rgba(0,0,0,0.2)' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+                                <div>
+                                    <h3 style={{ margin: 0, fontSize: '1.15rem', fontWeight: 900, color: '#0f172a' }}>Update Slip Number</h3>
+                                    <p style={{ margin: '2px 0 0 0', fontSize: '0.75rem', color: '#64748b', fontWeight: 600 }}>{slipFeeTarget.fee_categories?.name || 'Fee'} • {slipFeeTarget.month}</p>
+                                </div>
+                                <button onClick={() => setShowEditSlipModal(false)} style={{ border: 'none', background: '#f1f5f9', borderRadius: '10px', width: 36, height: 36, cursor: 'pointer', color: '#64748b' }}>
+                                    <span className="material-icons">close</span>
+                                </button>
+                            </div>
+
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+                                <div>
+                                    <label style={{ fontSize: '0.7rem', fontWeight: 800, color: '#64748b', textTransform: 'uppercase', display: 'block', marginBottom: '6px' }}>Slip Number</label>
+                                    <input
+                                        placeholder="Enter manual slip number (e.g. 50493)..."
+                                        value={slipInputVal}
+                                        onChange={e => setSlipInputVal(e.target.value)}
+                                        style={{ width: '100%', padding: '12px', borderRadius: '12px', border: '1.5px solid #cbd5e1', fontWeight: 800, fontSize: '0.95rem', outline: 'none' }}
+                                        autoFocus
+                                    />
+                                </div>
+
+                                <button
+                                    onClick={() => handleSaveSlipNo(slipFeeTarget.id, slipInputVal)}
+                                    disabled={isProcessing}
+                                    style={{
+                                        padding: '12px',
+                                        borderRadius: '12px',
+                                        border: 'none',
+                                        background: '#0f172a',
+                                        color: '#fff',
+                                        fontWeight: 800,
+                                        fontSize: '0.85rem',
+                                        cursor: 'pointer'
+                                    }}
+                                >
+                                    {isProcessing ? 'Saving...' : 'Save Slip Number'}
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                )}
+
+                {/* UPDATE BASE TUITION FEE MODAL */}
+                {showUpdateBaseFeeModal && selectedStudent && (
+                    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.65)', backdropFilter: 'blur(8px)', display: 'flex', justifyContent: 'center', alignItems: 'center', zIndex: 1200 }}>
+                        <div style={{ background: '#fff', width: '90%', maxWidth: '460px', borderRadius: '24px', padding: '28px', boxShadow: '0 20px 50px rgba(0,0,0,0.2)' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+                                <div>
+                                    <h3 style={{ margin: 0, fontSize: '1.15rem', fontWeight: 900, color: '#0f172a' }}>Update Base Fee</h3>
+                                    <p style={{ margin: '2px 0 0 0', fontSize: '0.75rem', color: '#64748b', fontWeight: 600 }}>for {selectedStudent.full_name} ({selectedStudent.grade})</p>
+                                </div>
+                                <button onClick={() => setShowUpdateBaseFeeModal(false)} style={{ border: 'none', background: '#f1f5f9', borderRadius: '10px', width: 36, height: 36, cursor: 'pointer', color: '#64748b' }}>
+                                    <span className="material-icons">close</span>
+                                </button>
+                            </div>
+
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+                                <div style={{ background: '#eff6ff', padding: '12px', borderRadius: '12px', border: '1px solid #bfdbfe', fontSize: '0.75rem', color: '#1e40af', fontWeight: 600 }}>
+                                    <strong>Fee Update Policy:</strong><br />
+                                    • All existing/old historical vouchers will remain at their original base fee.<br />
+                                    • Newly created vouchers in upcoming cycles will automatically use this new fee.
+                                </div>
+
+                                <div>
+                                    <label style={{ fontSize: '0.7rem', fontWeight: 800, color: '#64748b', textTransform: 'uppercase', display: 'block', marginBottom: '6px' }}>New Monthly Base Fee (PKR)</label>
+                                    <input
+                                        type="number"
+                                        placeholder="e.g. 5000"
+                                        value={newBaseFee || ''}
+                                        onChange={e => setNewBaseFee(Number(e.target.value))}
+                                        style={{ width: '100%', padding: '12px', borderRadius: '12px', border: '1.5px solid #0f172a', fontWeight: 900, fontSize: '1.1rem', outline: 'none' }}
+                                        autoFocus
+                                    />
+                                </div>
+
+                                <button
+                                    onClick={handleUpdateBaseFee}
+                                    disabled={isProcessing}
+                                    style={{
+                                        padding: '14px',
+                                        borderRadius: '12px',
+                                        border: 'none',
+                                        background: '#0f172a',
+                                        color: '#fff',
+                                        fontWeight: 900,
+                                        fontSize: '0.85rem',
+                                        cursor: 'pointer'
+                                    }}
+                                >
+                                    {isProcessing ? 'Updating...' : 'Confirm Base Fee Update'}
                                 </button>
                             </div>
                         </div>
