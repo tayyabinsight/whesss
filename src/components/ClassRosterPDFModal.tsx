@@ -22,7 +22,7 @@ interface ClassRosterPDFModalProps {
 
 // Female name indicators for accurate gender assignment fallback
 const FEMALE_NAMES = new Set([
-    'anabia', 'ayzal', 'hiba', 'khadija', 'mahas', 'eshal', 'fatima', 'fatimah', 'ayesha', 'ayesha', 
+    'anabia', 'ayzal', 'hiba', 'khadija', 'mahas', 'eshal', 'fatima', 'fatimah', 'ayesha', 
     'zainab', 'maryam', 'marium', 'minahil', 'noor', 'sara', 'sarah', 'dua', 'zoya', 'hoorain', 
     'bareera', 'inaya', 'manha', 'alveena', 'hafsa', 'aiman', 'amina', 'laiba', 'bushra', 'arfa', 
     'eman', 'haniya', 'kinza', 'mehak', 'alishba', 'sadia', 'samina', 'hira', 'sidra', 'rida', 
@@ -44,6 +44,20 @@ export const isFemaleStudent = (student: StudentItem): boolean => {
     return words.some(w => FEMALE_NAMES.has(w));
 };
 
+interface PageSection {
+    type: 'girls' | 'boys';
+    title: string;
+    students: { student: StudentItem; originalIndex: number }[];
+    blankCount: number;
+}
+
+interface ClassPageData {
+    className: string;
+    pageNumber: number;
+    totalPages: number;
+    sections: PageSection[];
+}
+
 export default function ClassRosterPDFModal({
     isOpen,
     onClose,
@@ -63,10 +77,11 @@ export default function ClassRosterPDFModal({
         }
         return classes[0] || '';
     });
-    const [blankRowsCount, setBlankRowsCount] = useState<number>(4);
+    const [previewPageIndex, setPreviewPageIndex] = useState<number>(0);
+    const [rowsPerPage, setRowsPerPage] = useState<number>(20);
 
     // Group students by class and gender
-    const classDataMap = useMemo(() => {
+    const classStudentsMap = useMemo(() => {
         const map: Record<string, { girls: StudentItem[]; boys: StudentItem[] }> = {};
         
         classes.forEach(cls => {
@@ -94,11 +109,148 @@ export default function ClassRosterPDFModal({
         return map;
     }, [students, classes]);
 
+    // Build paginated pages with exactly 20 student/entry rows per page
+    const classPagesMap = useMemo(() => {
+        const pagesMap: Record<string, ClassPageData[]> = {};
+
+        classes.forEach(cls => {
+            const data = classStudentsMap[cls] || { girls: [], boys: [] };
+            const girlsList = data.girls.map((g, idx) => ({ student: g, originalIndex: idx + 1 }));
+            const boysList = data.boys.map((b, idx) => ({ student: b, originalIndex: idx + 1 }));
+            const totalStudents = girlsList.length + boysList.length;
+
+            const pages: ClassPageData[] = [];
+
+            // If class fits on 1 page (<= rowsPerPage total students)
+            if (totalStudents <= rowsPerPage) {
+                const remainingSlots = rowsPerPage - totalStudents;
+                const sections: PageSection[] = [];
+
+                if (girlsList.length > 0 || boysList.length > 0) {
+                    if (girlsList.length > 0 && boysList.length > 0) {
+                        const blankGirls = Math.ceil(remainingSlots / 2);
+                        const blankBoys = Math.floor(remainingSlots / 2);
+
+                        sections.push({
+                            type: 'girls',
+                            title: 'Girls',
+                            students: girlsList,
+                            blankCount: blankGirls
+                        });
+                        sections.push({
+                            type: 'boys',
+                            title: 'Boys',
+                            students: boysList,
+                            blankCount: blankBoys
+                        });
+                    } else if (girlsList.length > 0) {
+                        sections.push({
+                            type: 'girls',
+                            title: 'Girls',
+                            students: girlsList,
+                            blankCount: remainingSlots
+                        });
+                    } else {
+                        sections.push({
+                            type: 'boys',
+                            title: 'Boys',
+                            students: boysList,
+                            blankCount: remainingSlots
+                        });
+                    }
+                } else {
+                    // Empty class: split 20 blank rows between Girls and Boys
+                    sections.push({
+                        type: 'girls',
+                        title: 'Girls',
+                        students: [],
+                        blankCount: Math.ceil(rowsPerPage / 2)
+                    });
+                    sections.push({
+                        type: 'boys',
+                        title: 'Boys',
+                        students: [],
+                        blankCount: Math.floor(rowsPerPage / 2)
+                    });
+                }
+
+                pages.push({
+                    className: cls,
+                    pageNumber: 1,
+                    totalPages: 1,
+                    sections
+                });
+            } else {
+                // Multi-page class pagination (20 slots per page)
+                let gIndex = 0;
+                let bIndex = 0;
+
+                while (gIndex < girlsList.length || bIndex < boysList.length) {
+                    let pageRemainingSlots = rowsPerPage;
+                    const sections: PageSection[] = [];
+
+                    // Fill girls if available
+                    if (gIndex < girlsList.length) {
+                        const canTakeG = Math.min(pageRemainingSlots, girlsList.length - gIndex);
+                        const gSlice = girlsList.slice(gIndex, gIndex + canTakeG);
+                        gIndex += canTakeG;
+                        pageRemainingSlots -= canTakeG;
+
+                        sections.push({
+                            type: 'girls',
+                            title: 'Girls',
+                            students: gSlice,
+                            blankCount: 0
+                        });
+                    }
+
+                    // Fill boys if slots remain and boys available
+                    if (pageRemainingSlots > 0 && bIndex < boysList.length) {
+                        const canTakeB = Math.min(pageRemainingSlots, boysList.length - bIndex);
+                        const bSlice = boysList.slice(bIndex, bIndex + canTakeB);
+                        bIndex += canTakeB;
+                        pageRemainingSlots -= canTakeB;
+
+                        sections.push({
+                            type: 'boys',
+                            title: 'Boys',
+                            students: bSlice,
+                            blankCount: 0
+                        });
+                    }
+
+                    // If it's the last page and still has remaining slots, pad with blanks up to rowsPerPage
+                    if (pageRemainingSlots > 0) {
+                        if (sections.length > 0) {
+                            sections[sections.length - 1].blankCount += pageRemainingSlots;
+                        }
+                    }
+
+                    pages.push({
+                        className: cls,
+                        pageNumber: pages.length + 1,
+                        totalPages: 1, // updated below
+                        sections
+                    });
+                }
+
+                // Update totalPages count
+                pages.forEach(p => {
+                    p.totalPages = pages.length;
+                });
+            }
+
+            pagesMap[cls] = pages;
+        });
+
+        return pagesMap;
+    }, [classStudentsMap, classes, rowsPerPage]);
+
     if (!isOpen) return null;
 
     const activeClassesToPrint = selectedClasses.length > 0 ? selectedClasses : classes;
 
-    // Generate HTML for printing
+    // Generate HTML for printing with exactly 20 rows per page and NO border around the page
     const handlePrintOrDownloadPDF = () => {
         const printWin = window.open('', '_blank');
         if (!printWin) {
@@ -106,136 +258,107 @@ export default function ClassRosterPDFModal({
             return;
         }
 
-        const pagesHtml = activeClassesToPrint.map(cls => {
-            const data = classDataMap[cls] || { girls: [], boys: [] };
+        // Collect all pages across all selected classes
+        const allPagesHtml: string[] = [];
+
+        activeClassesToPrint.forEach(cls => {
+            const pages = classPagesMap[cls] || [];
             const formattedClassName = cls.toUpperCase().startsWith('CLASS') 
                 ? cls.toUpperCase() 
                 : `CLASS ${cls.toUpperCase()}`;
 
-            // Build Girls Rows
-            const girlsRowsHtml = data.girls.map((g, idx) => {
-                const sNo = String(idx + 1).padStart(2, '0') + '.';
-                const sName = g.full_name || '';
-                const fName = g.father_name || g.raw?.guardian_name || g.raw?.father_name || '';
-                return `
-                    <tr>
-                        <td class="col-sno">${sNo}</td>
-                        <td class="col-name">${sName}</td>
-                        <td class="col-father">${fName}</td>
-                    </tr>
-                `;
-            }).join('');
+            pages.forEach(p => {
+                let tableRowsHtml = '';
 
-            // Build Blank Girls Rows
-            const blankGirlsRowsHtml = Array.from({ length: blankRowsCount }).map(() => `
-                <tr class="blank-row">
-                    <td class="col-sno">&nbsp;</td>
-                    <td class="col-name">&nbsp;</td>
-                    <td class="col-father">&nbsp;</td>
-                </tr>
-            `).join('');
-
-            // Build Boys Rows
-            const boysRowsHtml = data.boys.map((b, idx) => {
-                const sNo = String(idx + 1).padStart(2, '0') + '.';
-                const sName = b.full_name || '';
-                const fName = b.father_name || b.raw?.guardian_name || b.raw?.father_name || '';
-                return `
-                    <tr>
-                        <td class="col-sno">${sNo}</td>
-                        <td class="col-name">${sName}</td>
-                        <td class="col-father">${fName}</td>
-                    </tr>
-                `;
-            }).join('');
-
-            // Build Blank Boys Rows
-            const blankBoysRowsHtml = Array.from({ length: blankRowsCount }).map(() => `
-                <tr class="blank-row">
-                    <td class="col-sno">&nbsp;</td>
-                    <td class="col-name">&nbsp;</td>
-                    <td class="col-father">&nbsp;</td>
-                </tr>
-            `).join('');
-
-            return `
-                <div class="a4-page">
-                    <div class="outer-border">
-                        <div class="inner-border">
-                            
-                            <!-- Header Title -->
-                            <div class="class-header">
-                                <div class="flourish-left">
-                                    <svg viewBox="0 0 60 24" width="54" height="20" fill="#08213d">
-                                        <path d="M50,12 C40,4 25,6 18,14 C14,18 8,18 4,14 C2,12 0,14 0,16 C0,19 6,22 12,18 C18,14 26,12 34,16 C40,19 46,18 50,12 Z M22,10 C26,6 36,4 46,8 C40,12 30,12 22,10 Z"/>
-                                        <circle cx="56" cy="12" r="2.5"/>
-                                        <circle cx="8" cy="14" r="1.5"/>
-                                    </svg>
+                p.sections.forEach(section => {
+                    // Section Banner
+                    tableRowsHtml += `
+                        <tr class="section-row">
+                            <td colspan="3">
+                                <div class="section-badge">
+                                    <span class="sub-line"></span>
+                                    <span class="sub-diamond">◆</span>
+                                    <span class="script-title">${section.title}</span>
+                                    <span class="sub-diamond">◆</span>
+                                    <span class="sub-line"></span>
                                 </div>
-                                <h1 class="class-title">${formattedClassName}</h1>
-                                <div class="flourish-right">
-                                    <svg viewBox="0 0 60 24" width="54" height="20" fill="#08213d" style="transform: scaleX(-1);">
-                                        <path d="M50,12 C40,4 25,6 18,14 C14,18 8,18 4,14 C2,12 0,14 0,16 C0,19 6,22 12,18 C18,14 26,12 34,16 C40,19 46,18 50,12 Z M22,10 C26,6 36,4 46,8 C40,12 30,12 22,10 Z"/>
-                                        <circle cx="56" cy="12" r="2.5"/>
-                                        <circle cx="8" cy="14" r="1.5"/>
-                                    </svg>
-                                </div>
+                            </td>
+                        </tr>
+                    `;
+
+                    // Real Student Rows
+                    section.students.forEach(item => {
+                        const sNo = String(item.originalIndex).padStart(2, '0') + '.';
+                        const sName = item.student.full_name || '';
+                        const fName = item.student.father_name || item.student.raw?.guardian_name || item.student.raw?.father_name || '';
+                        tableRowsHtml += `
+                            <tr>
+                                <td class="col-sno">${sNo}</td>
+                                <td class="col-name">${sName}</td>
+                                <td class="col-father">${fName}</td>
+                            </tr>
+                        `;
+                    });
+
+                    // Blank Ruled Rows
+                    for (let i = 0; i < section.blankCount; i++) {
+                        tableRowsHtml += `
+                            <tr class="blank-row">
+                                <td class="col-sno">&nbsp;</td>
+                                <td class="col-name">&nbsp;</td>
+                                <td class="col-father">&nbsp;</td>
+                            </tr>
+                        `;
+                    }
+                });
+
+                const pageHtml = `
+                    <div class="a4-page">
+                        <!-- Header Title -->
+                        <div class="class-header">
+                            <div class="flourish-left">
+                                <svg viewBox="0 0 60 24" width="54" height="20" fill="#08213d">
+                                    <path d="M50,12 C40,4 25,6 18,14 C14,18 8,18 4,14 C2,12 0,14 0,16 C0,19 6,22 12,18 C18,14 26,12 34,16 C40,19 46,18 50,12 Z M22,10 C26,6 36,4 46,8 C40,12 30,12 22,10 Z"/>
+                                    <circle cx="56" cy="12" r="2.5"/>
+                                    <circle cx="8" cy="14" r="1.5"/>
+                                </svg>
                             </div>
-
-                            <!-- Header Diamond Underline -->
-                            <div class="header-divider">
-                                <span class="div-line"></span>
-                                <span class="div-diamond">♦</span>
-                                <span class="div-line"></span>
+                            <h1 class="class-title">${formattedClassName}</h1>
+                            <div class="flourish-right">
+                                <svg viewBox="0 0 60 24" width="54" height="20" fill="#08213d" style="transform: scaleX(-1);">
+                                    <path d="M50,12 C40,4 25,6 18,14 C14,18 8,18 4,14 C2,12 0,14 0,16 C0,19 6,22 12,18 C18,14 26,12 34,16 C40,19 46,18 50,12 Z M22,10 C26,6 36,4 46,8 C40,12 30,12 22,10 Z"/>
+                                    <circle cx="56" cy="12" r="2.5"/>
+                                    <circle cx="8" cy="14" r="1.5"/>
+                                </svg>
                             </div>
-
-                            <!-- Main Data Table -->
-                            <table class="roster-table">
-                                <thead>
-                                    <tr>
-                                        <th class="col-sno">S. NO.</th>
-                                        <th class="col-name">STUDENT'S NAME</th>
-                                        <th class="col-father">FATHER'S NAME</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    <!-- Girls Section Heading -->
-                                    <tr class="section-row">
-                                        <td colspan="3">
-                                            <div class="section-badge">
-                                                <span class="sub-line"></span>
-                                                <span class="sub-diamond">◆</span>
-                                                <span class="script-title">Girls</span>
-                                                <span class="sub-diamond">◆</span>
-                                                <span class="sub-line"></span>
-                                            </div>
-                                        </td>
-                                    </tr>
-                                    ${girlsRowsHtml}
-                                    ${blankGirlsRowsHtml}
-
-                                    <!-- Boys Section Heading -->
-                                    <tr class="section-row">
-                                        <td colspan="3">
-                                            <div class="section-badge">
-                                                <span class="sub-line"></span>
-                                                <span class="sub-diamond">◆</span>
-                                                <span class="script-title">Boys</span>
-                                                <span class="sub-diamond">◆</span>
-                                                <span class="sub-line"></span>
-                                            </div>
-                                        </td>
-                                    </tr>
-                                    ${boysRowsHtml}
-                                    ${blankBoysRowsHtml}
-                                </tbody>
-                            </table>
-
                         </div>
+
+                        <!-- Header Diamond Underline -->
+                        <div class="header-divider">
+                            <span class="div-line"></span>
+                            <span class="div-diamond">♦</span>
+                            <span class="div-line"></span>
+                        </div>
+
+                        <!-- Main Data Table (Exactly 20 student/entry rows per page) -->
+                        <table class="roster-table">
+                            <thead>
+                                <tr>
+                                    <th class="col-sno">S. NO.</th>
+                                    <th class="col-name">STUDENT'S NAME</th>
+                                    <th class="col-father">FATHER'S NAME</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                ${tableRowsHtml}
+                            </tbody>
+                        </table>
                     </div>
-                </div>
-            `;
-        }).join('');
+                `;
+
+                allPagesHtml.push(pageHtml);
+            });
+        });
 
         const fullDocument = `
             <!DOCTYPE html>
@@ -280,32 +403,19 @@ export default function ClassRosterPDFModal({
                         }
                     }
 
+                    /* Clean borderless A4 container with standard print margins */
                     .a4-page {
                         width: 210mm;
-                        min-height: 297mm;
-                        padding: 8mm;
+                        height: 297mm;
+                        max-height: 297mm;
+                        padding: 12mm 14mm;
                         margin: 10mm auto;
                         background: #ffffff;
                         box-shadow: 0 10px 30px rgba(0,0,0,0.1);
                         position: relative;
                         display: flex;
                         flex-direction: column;
-                    }
-
-                    .outer-border {
-                        border: 2px solid #08213d;
-                        padding: 4mm;
-                        flex: 1;
-                        display: flex;
-                        flex-direction: column;
-                    }
-
-                    .inner-border {
-                        border: 1px solid #08213d;
-                        padding: 5mm 6mm;
-                        flex: 1;
-                        display: flex;
-                        flex-direction: column;
+                        overflow: hidden;
                     }
 
                     .class-header {
@@ -313,13 +423,13 @@ export default function ClassRosterPDFModal({
                         align-items: center;
                         justify-content: center;
                         gap: 16px;
-                        margin-top: 4px;
+                        margin-top: 2px;
                         margin-bottom: 2px;
                     }
 
                     .class-title {
                         font-family: 'Cinzel', 'Playfair Display', Georgia, serif;
-                        font-size: 26pt;
+                        font-size: 25pt;
                         font-weight: 800;
                         color: #08213d;
                         letter-spacing: 2px;
@@ -334,7 +444,7 @@ export default function ClassRosterPDFModal({
                         justify-content: center;
                         gap: 8px;
                         margin-top: 2px;
-                        margin-bottom: 14px;
+                        margin-bottom: 12px;
                     }
 
                     .div-line {
@@ -354,6 +464,7 @@ export default function ClassRosterPDFModal({
                         width: 100%;
                         border-collapse: collapse;
                         border: 1.5px solid #08213d;
+                        table-layout: fixed;
                     }
 
                     .roster-table thead tr {
@@ -368,7 +479,7 @@ export default function ClassRosterPDFModal({
                         font-size: 10.5pt;
                         font-weight: 800;
                         letter-spacing: 0.8px;
-                        padding: 9px 8px;
+                        padding: 7px 8px;
                         border: 1px solid #08213d;
                         text-align: center;
                     }
@@ -392,12 +503,12 @@ export default function ClassRosterPDFModal({
 
                     /* Section Row (Girls / Boys) */
                     .section-row td {
-                        padding: 6px 0 !important;
+                        padding: 4px 0 !important;
                         background: #ffffff !important;
                         border-top: 1px solid #7a94b5;
                         border-bottom: 1px solid #7a94b5;
-                        border-left: 1px solid #08213d;
-                        border-right: 1px solid #08213d;
+                        border-left: 1.5px solid #08213d;
+                        border-right: 1.5px solid #08213d;
                         text-align: center;
                     }
 
@@ -422,24 +533,26 @@ export default function ClassRosterPDFModal({
 
                     .script-title {
                         font-family: 'Great Vibes', 'Playfair Display', cursive;
-                        font-size: 24pt;
+                        font-size: 22pt;
                         font-weight: 400;
                         color: #08213d;
                         line-height: 1;
                         padding: 0 4px;
                     }
 
-                    /* Table Cells */
+                    /* Table Cells - calibrated for exactly 20 rows on A4 */
                     .roster-table tbody tr td {
                         border: 1px solid #7a94b5;
-                        padding: 7px 10px;
-                        font-size: 10.5pt;
+                        padding: 5.5px 10px;
+                        font-size: 10pt;
                         font-weight: 500;
                         color: #0f172a;
+                        height: 31.5px;
+                        box-sizing: border-box;
                     }
 
                     .roster-table tbody tr.blank-row td {
-                        height: 31px;
+                        height: 31.5px;
                     }
 
                     .roster-table tbody tr:not(.section-row):not(.blank-row) td.col-sno {
@@ -460,7 +573,7 @@ export default function ClassRosterPDFModal({
                 </style>
             </head>
             <body>
-                ${pagesHtml}
+                ${allPagesHtml.join('')}
                 <script>
                     window.onload = function() {
                         setTimeout(function() {
@@ -477,10 +590,20 @@ export default function ClassRosterPDFModal({
         printWin.document.close();
     };
 
-    const currentPreviewData = classDataMap[previewClass] || { girls: [], boys: [] };
+    const currentClassPages = classPagesMap[previewClass] || [];
+    const activePreviewPage = currentClassPages[previewPageIndex] || currentClassPages[0] || {
+        className: previewClass,
+        pageNumber: 1,
+        totalPages: 1,
+        sections: []
+    };
+
     const formattedPreviewClassName = previewClass.toUpperCase().startsWith('CLASS') 
         ? previewClass.toUpperCase() 
         : `CLASS ${previewClass.toUpperCase()}`;
+
+    // Total page count for export
+    const totalPagesToExport = activeClassesToPrint.reduce((acc, c) => acc + (classPagesMap[c]?.length || 1), 0);
 
     return (
         <div style={{
@@ -533,7 +656,7 @@ export default function ClassRosterPDFModal({
                                 Class Student Roster — Official A4 PDF Generator
                             </h2>
                             <p style={{ margin: '2px 0 0 0', fontSize: '0.75rem', color: '#94a3b8', fontWeight: 600 }}>
-                                Standard A4 layout &bull; Real student registry &bull; Distinct Girls & Boys sections with empty ruled rows
+                                Standard A4 layout &bull; Borderless sheet &bull; 20 Student rows per page &bull; Real student registry
                             </p>
                         </div>
                     </div>
@@ -558,7 +681,7 @@ export default function ClassRosterPDFModal({
                             }}
                         >
                             <span className="material-icons" style={{ fontSize: '18px' }}>download</span>
-                            Download / Print PDF ({activeClassesToPrint.length} {activeClassesToPrint.length === 1 ? 'Class' : 'Classes'})
+                            Download / Print PDF ({totalPagesToExport} {totalPagesToExport === 1 ? 'Page' : 'Pages'})
                         </button>
                         <button
                             onClick={onClose}
@@ -648,6 +771,7 @@ export default function ClassRosterPDFModal({
                             }}>
                                 {classes.map(c => {
                                     const count = students.filter(s => s.grade === c).length;
+                                    const pagesCount = classPagesMap[c]?.length || 1;
                                     const isChecked = selectedClasses.includes(c);
                                     return (
                                         <label
@@ -681,7 +805,7 @@ export default function ClassRosterPDFModal({
                                                 <span>{c}</span>
                                             </div>
                                             <span style={{ fontSize: '0.7rem', color: '#64748b', fontWeight: 600 }}>
-                                                {count} std
+                                                {count} std ({pagesCount} pg)
                                             </span>
                                         </label>
                                     );
@@ -689,26 +813,38 @@ export default function ClassRosterPDFModal({
                             </div>
                         </div>
 
-                        {/* Blank Ruled Rows Slider */}
+                        {/* Page Capacity Configuration */}
                         <div>
                             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
                                 <label style={{ fontSize: '0.75rem', fontWeight: 800, color: '#0f172a', textTransform: 'uppercase' }}>
-                                    Blank Ruled Rows
+                                    Rows Per A4 Page
                                 </label>
                                 <span style={{ fontSize: '0.75rem', fontWeight: 800, color: '#2563eb' }}>
-                                    {blankRowsCount} lines
+                                    {rowsPerPage} Rows
                                 </span>
                             </div>
-                            <input
-                                type="range"
-                                min={0}
-                                max={10}
-                                value={blankRowsCount}
-                                onChange={e => setBlankRowsCount(Number(e.target.value))}
-                                style={{ width: '100%', cursor: 'pointer' }}
-                            />
-                            <p style={{ margin: '4px 0 0 0', fontSize: '0.65rem', color: '#64748b', fontWeight: 500 }}>
-                                Extra blank lines appended after student records to fill the page cleanly.
+                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '6px' }}>
+                                {[18, 20, 22].map(num => (
+                                    <button
+                                        key={num}
+                                        onClick={() => setRowsPerPage(num)}
+                                        style={{
+                                            padding: '7px 4px',
+                                            borderRadius: '8px',
+                                            border: '1px solid #cbd5e1',
+                                            background: rowsPerPage === num ? '#08213d' : '#ffffff',
+                                            color: rowsPerPage === num ? '#ffffff' : '#334155',
+                                            fontWeight: 700,
+                                            fontSize: '0.75rem',
+                                            cursor: 'pointer'
+                                        }}
+                                    >
+                                        {num} rows {num === 20 ? '(Standard)' : ''}
+                                    </button>
+                                ))}
+                            </div>
+                            <p style={{ margin: '6px 0 0 0', fontSize: '0.65rem', color: '#64748b', fontWeight: 500 }}>
+                                Each A4 page is populated with exactly {rowsPerPage} rows according to available students and blank ruled ledger lines.
                             </p>
                         </div>
 
@@ -724,8 +860,8 @@ export default function ClassRosterPDFModal({
                                 Export Summary
                             </div>
                             <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem', marginBottom: '4px', fontWeight: 600, color: '#0f172a' }}>
-                                <span>Pages (A4):</span>
-                                <span>{activeClassesToPrint.length} Page{activeClassesToPrint.length === 1 ? '' : 's'}</span>
+                                <span>Total A4 Pages:</span>
+                                <span style={{ fontWeight: 800, color: '#2563eb' }}>{totalPagesToExport} Page{totalPagesToExport === 1 ? '' : 's'}</span>
                             </div>
                             <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem', fontWeight: 600, color: '#0f172a' }}>
                                 <span>Total Students:</span>
@@ -751,179 +887,192 @@ export default function ClassRosterPDFModal({
                         <div style={{
                             display: 'flex',
                             alignItems: 'center',
-                            gap: '8px',
-                            background: '#ffffff',
-                            padding: '6px 12px',
-                            borderRadius: '14px',
-                            boxShadow: '0 2px 8px rgba(0,0,0,0.06)',
-                            maxWidth: '100%',
-                            overflowX: 'auto'
+                            justifyContent: 'space-between',
+                            width: '740px',
+                            gap: '8px'
                         }}>
-                            <span style={{ fontSize: '0.75rem', fontWeight: 800, color: '#64748b', textTransform: 'uppercase', paddingRight: '6px' }}>
-                                Previewing Class:
-                            </span>
-                            {classes.map(cls => (
-                                <button
-                                    key={cls}
-                                    onClick={() => setPreviewClass(cls)}
-                                    style={{
-                                        padding: '6px 12px',
-                                        borderRadius: '8px',
-                                        border: 'none',
-                                        background: previewClass === cls ? '#08213d' : '#f1f5f9',
-                                        color: previewClass === cls ? '#ffffff' : '#475569',
-                                        fontWeight: 700,
-                                        fontSize: '0.75rem',
-                                        cursor: 'pointer',
-                                        whiteSpace: 'nowrap'
-                                    }}
-                                >
-                                    {cls}
-                                </button>
-                            ))}
+                            <div style={{
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '6px',
+                                background: '#ffffff',
+                                padding: '6px 12px',
+                                borderRadius: '14px',
+                                boxShadow: '0 2px 8px rgba(0,0,0,0.06)',
+                                overflowX: 'auto',
+                                flex: 1
+                            }}>
+                                <span style={{ fontSize: '0.75rem', fontWeight: 800, color: '#64748b', textTransform: 'uppercase', paddingRight: '6px' }}>
+                                    Class:
+                                </span>
+                                {classes.map(cls => (
+                                    <button
+                                        key={cls}
+                                        onClick={() => {
+                                            setPreviewClass(cls);
+                                            setPreviewPageIndex(0);
+                                        }}
+                                        style={{
+                                            padding: '6px 12px',
+                                            borderRadius: '8px',
+                                            border: 'none',
+                                            background: previewClass === cls ? '#08213d' : '#f1f5f9',
+                                            color: previewClass === cls ? '#ffffff' : '#475569',
+                                            fontWeight: 700,
+                                            fontSize: '0.75rem',
+                                            cursor: 'pointer',
+                                            whiteSpace: 'nowrap'
+                                        }}
+                                    >
+                                        {cls}
+                                    </button>
+                                ))}
+                            </div>
+
+                            {/* Page switcher if class has > 1 page */}
+                            {currentClassPages.length > 1 && (
+                                <div style={{
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    gap: '6px',
+                                    background: '#ffffff',
+                                    padding: '6px 10px',
+                                    borderRadius: '14px',
+                                    boxShadow: '0 2px 8px rgba(0,0,0,0.06)'
+                                }}>
+                                    <span style={{ fontSize: '0.75rem', fontWeight: 700, color: '#475569' }}>
+                                        Page {previewPageIndex + 1} of {currentClassPages.length}
+                                    </span>
+                                    <button
+                                        disabled={previewPageIndex === 0}
+                                        onClick={() => setPreviewPageIndex(p => Math.max(0, p - 1))}
+                                        style={{
+                                            border: '1px solid #cbd5e1',
+                                            background: '#f8fafc',
+                                            borderRadius: '6px',
+                                            cursor: previewPageIndex === 0 ? 'not-allowed' : 'pointer',
+                                            opacity: previewPageIndex === 0 ? 0.4 : 1,
+                                            padding: '2px 6px'
+                                        }}
+                                    >
+                                        ◀
+                                    </button>
+                                    <button
+                                        disabled={previewPageIndex >= currentClassPages.length - 1}
+                                        onClick={() => setPreviewPageIndex(p => Math.min(currentClassPages.length - 1, p + 1))}
+                                        style={{
+                                            border: '1px solid #cbd5e1',
+                                            background: '#f8fafc',
+                                            borderRadius: '6px',
+                                            cursor: previewPageIndex >= currentClassPages.length - 1 ? 'not-allowed' : 'pointer',
+                                            opacity: previewPageIndex >= currentClassPages.length - 1 ? 0.4 : 1,
+                                            padding: '2px 6px'
+                                        }}
+                                    >
+                                        ▶
+                                    </button>
+                                </div>
+                            )}
                         </div>
 
-                        {/* Accurate Scaled A4 Sheet Rendering */}
+                        {/* Clean Borderless Scaled A4 Sheet Rendering */}
                         <div style={{
                             width: '740px',
                             background: '#ffffff',
                             boxShadow: '0 12px 36px rgba(0,0,0,0.15)',
-                            padding: '24px',
+                            padding: '36px 40px',
                             boxSizing: 'border-box',
                             display: 'flex',
                             flexDirection: 'column',
                             minHeight: '1000px',
                             fontFamily: 'system-ui, -apple-system, sans-serif'
                         }}>
-                            {/* Outer Navy Border */}
-                            <div style={{
-                                border: '2.5px solid #08213d',
-                                padding: '12px',
-                                flex: 1,
-                                display: 'flex',
-                                flexDirection: 'column'
-                            }}>
-                                {/* Inner Fine Navy Border */}
-                                <div style={{
-                                    border: '1px solid #08213d',
-                                    padding: '16px 18px',
-                                    flex: 1,
-                                    display: 'flex',
-                                    flexDirection: 'column'
+                            
+                            {/* Class Header with Flourishes */}
+                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '14px', marginTop: '2px' }}>
+                                <svg viewBox="0 0 60 24" width="48" height="18" fill="#08213d">
+                                    <path d="M50,12 C40,4 25,6 18,14 C14,18 8,18 4,14 C2,12 0,14 0,16 C0,19 6,22 12,18 C18,14 26,12 34,16 C40,19 46,18 50,12 Z M22,10 C26,6 36,4 46,8 C40,12 30,12 22,10 Z"/>
+                                    <circle cx="56" cy="12" r="2.5"/>
+                                    <circle cx="8" cy="14" r="1.5"/>
+                                </svg>
+                                <h1 style={{
+                                    margin: 0,
+                                    fontFamily: 'serif',
+                                    fontSize: '1.85rem',
+                                    fontWeight: 900,
+                                    color: '#08213d',
+                                    letterSpacing: '2px',
+                                    textTransform: 'uppercase'
                                 }}>
-                                    
-                                    {/* Class Header with Flourishes */}
-                                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '14px', marginTop: '4px' }}>
-                                        <svg viewBox="0 0 60 24" width="48" height="18" fill="#08213d">
-                                            <path d="M50,12 C40,4 25,6 18,14 C14,18 8,18 4,14 C2,12 0,14 0,16 C0,19 6,22 12,18 C18,14 26,12 34,16 C40,19 46,18 50,12 Z M22,10 C26,6 36,4 46,8 C40,12 30,12 22,10 Z"/>
-                                            <circle cx="56" cy="12" r="2.5"/>
-                                            <circle cx="8" cy="14" r="1.5"/>
-                                        </svg>
-                                        <h1 style={{
-                                            margin: 0,
-                                            fontFamily: 'serif',
-                                            fontSize: '1.75rem',
-                                            fontWeight: 900,
-                                            color: '#08213d',
-                                            letterSpacing: '2px',
-                                            textTransform: 'uppercase'
-                                        }}>
-                                            {formattedPreviewClassName}
-                                        </h1>
-                                        <svg viewBox="0 0 60 24" width="48" height="18" fill="#08213d" style={{ transform: 'scaleX(-1)' }}>
-                                            <path d="M50,12 C40,4 25,6 18,14 C14,18 8,18 4,14 C2,12 0,14 0,16 C0,19 6,22 12,18 C18,14 26,12 34,16 C40,19 46,18 50,12 Z M22,10 C26,6 36,4 46,8 C40,12 30,12 22,10 Z"/>
-                                            <circle cx="56" cy="12" r="2.5"/>
-                                            <circle cx="8" cy="14" r="1.5"/>
-                                        </svg>
-                                    </div>
-
-                                    {/* Diamond Divider */}
-                                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', marginTop: '2px', marginBottom: '14px' }}>
-                                        <div style={{ height: '1px', background: '#08213d', width: '80px' }} />
-                                        <span style={{ fontSize: '9px', color: '#08213d' }}>♦</span>
-                                        <div style={{ height: '1px', background: '#08213d', width: '80px' }} />
-                                    </div>
-
-                                    {/* Roster Table */}
-                                    <table style={{ width: '100%', borderCollapse: 'collapse', border: '1.5px solid #08213d' }}>
-                                        <thead>
-                                            <tr style={{ background: '#08213d', color: '#ffffff' }}>
-                                                <th style={{ padding: '8px', fontSize: '0.8rem', fontWeight: 800, width: '14%', border: '1px solid #08213d', textAlign: 'center' }}>S. NO.</th>
-                                                <th style={{ padding: '8px 12px', fontSize: '0.8rem', fontWeight: 800, width: '43%', border: '1px solid #08213d', textAlign: 'center' }}>STUDENT'S NAME</th>
-                                                <th style={{ padding: '8px 12px', fontSize: '0.8rem', fontWeight: 800, width: '43%', border: '1px solid #08213d', textAlign: 'center' }}>FATHER'S NAME</th>
-                                            </tr>
-                                        </thead>
-                                        <tbody>
-                                            {/* Girls Section */}
-                                            <tr>
-                                                <td colSpan={3} style={{ padding: '4px 0', textAlign: 'center', border: '1px solid #7a94b5', borderLeft: '1.5px solid #08213d', borderRight: '1.5px solid #08213d' }}>
-                                                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '10px' }}>
-                                                        <div style={{ height: '1px', background: '#08213d', width: '60px' }} />
-                                                        <span style={{ fontSize: '8px', color: '#08213d' }}>◆</span>
-                                                        <span style={{ fontFamily: 'cursive', fontSize: '1.4rem', color: '#08213d', padding: '0 4px' }}>Girls</span>
-                                                        <span style={{ fontSize: '8px', color: '#08213d' }}>◆</span>
-                                                        <div style={{ height: '1px', background: '#08213d', width: '60px' }} />
-                                                    </div>
-                                                </td>
-                                            </tr>
-                                            {currentPreviewData.girls.map((g, idx) => (
-                                                <tr key={g.id || idx}>
-                                                    <td style={{ padding: '6px 8px', fontSize: '0.85rem', fontWeight: 600, color: '#08213d', textAlign: 'center', border: '1px solid #7a94b5' }}>
-                                                        {String(idx + 1).padStart(2, '0')}.
-                                                    </td>
-                                                    <td style={{ padding: '6px 12px', fontSize: '0.85rem', fontWeight: 600, color: '#0f172a', border: '1px solid #7a94b5' }}>
-                                                        {g.full_name}
-                                                    </td>
-                                                    <td style={{ padding: '6px 12px', fontSize: '0.85rem', fontWeight: 500, color: '#334155', border: '1px solid #7a94b5' }}>
-                                                        {g.father_name || g.raw?.guardian_name || g.raw?.father_name || ''}
-                                                    </td>
-                                                </tr>
-                                            ))}
-                                            {Array.from({ length: blankRowsCount }).map((_, bIdx) => (
-                                                <tr key={`bg-${bIdx}`}>
-                                                    <td style={{ padding: '6px 8px', height: '24px', border: '1px solid #7a94b5' }}>&nbsp;</td>
-                                                    <td style={{ padding: '6px 12px', height: '24px', border: '1px solid #7a94b5' }}>&nbsp;</td>
-                                                    <td style={{ padding: '6px 12px', height: '24px', border: '1px solid #7a94b5' }}>&nbsp;</td>
-                                                </tr>
-                                            ))}
-
-                                            {/* Boys Section */}
-                                            <tr>
-                                                <td colSpan={3} style={{ padding: '4px 0', textAlign: 'center', border: '1px solid #7a94b5', borderLeft: '1.5px solid #08213d', borderRight: '1.5px solid #08213d' }}>
-                                                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '10px' }}>
-                                                        <div style={{ height: '1px', background: '#08213d', width: '60px' }} />
-                                                        <span style={{ fontSize: '8px', color: '#08213d' }}>◆</span>
-                                                        <span style={{ fontFamily: 'cursive', fontSize: '1.4rem', color: '#08213d', padding: '0 4px' }}>Boys</span>
-                                                        <span style={{ fontSize: '8px', color: '#08213d' }}>◆</span>
-                                                        <div style={{ height: '1px', background: '#08213d', width: '60px' }} />
-                                                    </div>
-                                                </td>
-                                            </tr>
-                                            {currentPreviewData.boys.map((b, idx) => (
-                                                <tr key={b.id || idx}>
-                                                    <td style={{ padding: '6px 8px', fontSize: '0.85rem', fontWeight: 600, color: '#08213d', textAlign: 'center', border: '1px solid #7a94b5' }}>
-                                                        {String(idx + 1).padStart(2, '0')}.
-                                                    </td>
-                                                    <td style={{ padding: '6px 12px', fontSize: '0.85rem', fontWeight: 600, color: '#0f172a', border: '1px solid #7a94b5' }}>
-                                                        {b.full_name}
-                                                    </td>
-                                                    <td style={{ padding: '6px 12px', fontSize: '0.85rem', fontWeight: 500, color: '#334155', border: '1px solid #7a94b5' }}>
-                                                        {b.father_name || b.raw?.guardian_name || b.raw?.father_name || ''}
-                                                    </td>
-                                                </tr>
-                                            ))}
-                                            {Array.from({ length: blankRowsCount }).map((_, bIdx) => (
-                                                <tr key={`bb-${bIdx}`}>
-                                                    <td style={{ padding: '6px 8px', height: '24px', border: '1px solid #7a94b5' }}>&nbsp;</td>
-                                                    <td style={{ padding: '6px 12px', height: '24px', border: '1px solid #7a94b5' }}>&nbsp;</td>
-                                                    <td style={{ padding: '6px 12px', height: '24px', border: '1px solid #7a94b5' }}>&nbsp;</td>
-                                                </tr>
-                                            ))}
-                                        </tbody>
-                                    </table>
-
-                                </div>
+                                    {formattedPreviewClassName}
+                                </h1>
+                                <svg viewBox="0 0 60 24" width="48" height="18" fill="#08213d" style={{ transform: 'scaleX(-1)' }}>
+                                    <path d="M50,12 C40,4 25,6 18,14 C14,18 8,18 4,14 C2,12 0,14 0,16 C0,19 6,22 12,18 C18,14 26,12 34,16 C40,19 46,18 50,12 Z M22,10 C26,6 36,4 46,8 C40,12 30,12 22,10 Z"/>
+                                    <circle cx="56" cy="12" r="2.5"/>
+                                    <circle cx="8" cy="14" r="1.5"/>
+                                </svg>
                             </div>
+
+                            {/* Diamond Divider */}
+                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', marginTop: '2px', marginBottom: '14px' }}>
+                                <div style={{ height: '1px', background: '#08213d', width: '80px' }} />
+                                <span style={{ fontSize: '9px', color: '#08213d' }}>♦</span>
+                                <div style={{ height: '1px', background: '#08213d', width: '80px' }} />
+                            </div>
+
+                            {/* Roster Table (Exactly 20 student/entry rows per page) */}
+                            <table style={{ width: '100%', borderCollapse: 'collapse', border: '1.5px solid #08213d', tableLayout: 'fixed' }}>
+                                <thead>
+                                    <tr style={{ background: '#08213d', color: '#ffffff' }}>
+                                        <th style={{ padding: '8px', fontSize: '0.8rem', fontWeight: 800, width: '14%', border: '1px solid #08213d', textAlign: 'center' }}>S. NO.</th>
+                                        <th style={{ padding: '8px 12px', fontSize: '0.8rem', fontWeight: 800, width: '43%', border: '1px solid #08213d', textAlign: 'center' }}>STUDENT'S NAME</th>
+                                        <th style={{ padding: '8px 12px', fontSize: '0.8rem', fontWeight: 800, width: '43%', border: '1px solid #08213d', textAlign: 'center' }}>FATHER'S NAME</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {activePreviewPage.sections.map((sec, sIdx) => (
+                                        <div key={`section-frag-${sIdx}`} style={{ display: 'contents' }}>
+                                            {/* Section Banner */}
+                                            <tr>
+                                                <td colSpan={3} style={{ padding: '4px 0', textAlign: 'center', border: '1px solid #7a94b5', borderLeft: '1.5px solid #08213d', borderRight: '1.5px solid #08213d' }}>
+                                                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '10px' }}>
+                                                        <div style={{ height: '1px', background: '#08213d', width: '60px' }} />
+                                                        <span style={{ fontSize: '8px', color: '#08213d' }}>◆</span>
+                                                        <span style={{ fontFamily: 'cursive', fontSize: '1.4rem', color: '#08213d', padding: '0 4px' }}>{sec.title}</span>
+                                                        <span style={{ fontSize: '8px', color: '#08213d' }}>◆</span>
+                                                        <div style={{ height: '1px', background: '#08213d', width: '60px' }} />
+                                                    </div>
+                                                </td>
+                                            </tr>
+
+                                            {/* Student Rows */}
+                                            {sec.students.map((item, idx) => (
+                                                <tr key={`std-${item.student.id || idx}`}>
+                                                    <td style={{ padding: '5.5px 8px', fontSize: '0.85rem', fontWeight: 600, color: '#08213d', textAlign: 'center', border: '1px solid #7a94b5', height: '31.5px' }}>
+                                                        {String(item.originalIndex).padStart(2, '0')}.
+                                                    </td>
+                                                    <td style={{ padding: '5.5px 12px', fontSize: '0.85rem', fontWeight: 600, color: '#0f172a', border: '1px solid #7a94b5', height: '31.5px' }}>
+                                                        {item.student.full_name}
+                                                    </td>
+                                                    <td style={{ padding: '5.5px 12px', fontSize: '0.85rem', fontWeight: 500, color: '#334155', border: '1px solid #7a94b5', height: '31.5px' }}>
+                                                        {item.student.father_name || item.student.raw?.guardian_name || item.student.raw?.father_name || ''}
+                                                    </td>
+                                                </tr>
+                                            ))}
+
+                                            {/* Blank Rows */}
+                                            {Array.from({ length: sec.blankCount }).map((_, bIdx) => (
+                                                <tr key={`blank-${sIdx}-${bIdx}`}>
+                                                    <td style={{ padding: '5.5px 8px', height: '31.5px', border: '1px solid #7a94b5' }}>&nbsp;</td>
+                                                    <td style={{ padding: '5.5px 12px', height: '31.5px', border: '1px solid #7a94b5' }}>&nbsp;</td>
+                                                    <td style={{ padding: '5.5px 12px', height: '31.5px', border: '1px solid #7a94b5' }}>&nbsp;</td>
+                                                </tr>
+                                            ))}
+                                        </div>
+                                    ))}
+                                </tbody>
+                            </table>
+
                         </div>
                     </div>
 
