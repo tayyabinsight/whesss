@@ -31,11 +31,21 @@ const FEMALE_NAMES = new Set([
     'bano', 'kiran', 'anam', 'nida', 'sania', 'fizza', 'shanza', 'maria', 'meerab', 'malaika',
     'shiza', 'aleena', 'alina', 'amna', 'areesha', 'armeen', 'ayra', 'danio', 'eimaan', 'falak',
     'hareem', 'insha', 'ifra', 'jawairia', 'liba', 'muntaha', 'natasha', 'parveen', 'rabia', 'rabiya',
-    'saba', 'sahar', 'sehar', 'sobia', 'tania', 'uzma', 'warda', 'yusra', 'zarish', 'momina'
+    'saba', 'sahar', 'sehar', 'sobia', 'tania', 'uzma', 'warda', 'yusra', 'zarish', 'momina',
+    'nimra', 'maham', 'komal', 'sawera', 'tehreem', 'wajiha', 'javaria', 'samra', 'anum',
+    'mahrukh', 'ayelen', 'mirha', 'aylah', 'ayla', 'areeba', 'mehwish', 'nargis', 'shazia',
+    'naseem', 'yasmeen', 'gul', 'faryal', 'kinzat', 'farah', 'nazia', 'faiza', 'farhat',
+    'shehnaz', 'humaira', 'madiha', 'kalsoom', 'kulsoom', 'bilqees', 'rukhsana', 'tahira',
+    'shabana', 'samreen', 'farzana', 'fouzia', 'fozia', 'shabnam', 'tasneem', 'nuzhat',
+    'naheed', 'shaheen', 'surayya', 'talat', 'farhat', 'tanzeela', 'sultana', 'begum',
+    'khatoon', 'bibi', 'janat', 'muskan', 'aqsa', 'huma', 'naila', 'asfa', 'afshan'
 ]);
 
-export const isFemaleStudent = (student: StudentItem): boolean => {
-    const rawGender = (student.gender || student.raw?.gender || '').toLowerCase().trim();
+export const isFemaleStudent = (student: StudentItem, overrides?: Record<string, 'girl' | 'boy'>): boolean => {
+    if (overrides && overrides[student.id]) {
+        return overrides[student.id] === 'girl';
+    }
+    const rawGender = (student.gender || student.raw?.gender || student.raw?.sex || '').toLowerCase().trim();
     if (rawGender === 'female' || rawGender === 'girl' || rawGender === 'f' || rawGender === 'daughter') return true;
     if (rawGender === 'male' || rawGender === 'boy' || rawGender === 'm' || rawGender === 'son') return false;
 
@@ -47,7 +57,7 @@ export const isFemaleStudent = (student: StudentItem): boolean => {
 interface PageSection {
     type: 'girls' | 'boys';
     title: string;
-    students: { student: StudentItem; originalIndex: number }[];
+    students: { student: StudentItem; displayIndex: number }[];
     blankCount: number;
 }
 
@@ -79,8 +89,32 @@ export default function ClassRosterPDFModal({
     });
     const [previewPageIndex, setPreviewPageIndex] = useState<number>(0);
     const [rowsPerPage, setRowsPerPage] = useState<number>(20);
+    const [sectionOrder, setSectionOrder] = useState<'girls-first' | 'boys-first'>('girls-first');
+    const [numberingMode, setNumberingMode] = useState<'sectional' | 'continuous'>('sectional');
+    const [sortOption, setSortOption] = useState<'name-asc' | 'id-asc' | 'original'>('name-asc');
+    const [genderOverrides, setGenderOverrides] = useState<Record<string, 'girl' | 'boy'>>({});
+    const [showStudentArranger, setShowStudentArranger] = useState<boolean>(false);
+    const [arrangerSearch, setArrangerSearch] = useState<string>('');
 
-    // Group students by class and gender
+    // Toggle student gender override
+    const handleToggleGender = (studentId: string, currentIsFemale: boolean) => {
+        setGenderOverrides(prev => ({
+            ...prev,
+            [studentId]: currentIsFemale ? 'boy' : 'girl'
+        }));
+    };
+
+    // Reset gender overrides for current class
+    const handleResetClassOverrides = (cls: string) => {
+        const classStudentIds = students.filter(s => s.grade === cls).map(s => s.id);
+        setGenderOverrides(prev => {
+            const next = { ...prev };
+            classStudentIds.forEach(id => delete next[id]);
+            return next;
+        });
+    };
+
+    // Group students by class and gender with active sorting & overrides
     const classStudentsMap = useMemo(() => {
         const map: Record<string, { girls: StudentItem[]; boys: StudentItem[] }> = {};
         
@@ -93,32 +127,57 @@ export default function ClassRosterPDFModal({
             if (!map[grade]) {
                 map[grade] = { girls: [], boys: [] };
             }
-            if (isFemaleStudent(s)) {
+            if (isFemaleStudent(s, genderOverrides)) {
                 map[grade].girls.push(s);
             } else {
                 map[grade].boys.push(s);
             }
         });
 
-        // Sort alphabetically inside each class
+        // Sort inside each class according to sortOption
         Object.keys(map).forEach(cls => {
-            map[cls].girls.sort((a, b) => (a.full_name || '').localeCompare(b.full_name || ''));
-            map[cls].boys.sort((a, b) => (a.full_name || '').localeCompare(b.full_name || ''));
+            if (sortOption === 'name-asc') {
+                map[cls].girls.sort((a, b) => (a.full_name || '').localeCompare(b.full_name || ''));
+                map[cls].boys.sort((a, b) => (a.full_name || '').localeCompare(b.full_name || ''));
+            } else if (sortOption === 'id-asc') {
+                map[cls].girls.sort((a, b) => (a.student_id || '').localeCompare(b.student_id || '', undefined, { numeric: true }));
+                map[cls].boys.sort((a, b) => (a.student_id || '').localeCompare(b.student_id || '', undefined, { numeric: true }));
+            }
         });
 
         return map;
-    }, [students, classes]);
+    }, [students, classes, genderOverrides, sortOption]);
 
-    // Build paginated pages with exactly 20 student/entry rows per page
+    // Build paginated pages with exactly rowsPerPage (20) student/entry rows per page
     const classPagesMap = useMemo(() => {
         const pagesMap: Record<string, ClassPageData[]> = {};
 
         classes.forEach(cls => {
             const data = classStudentsMap[cls] || { girls: [], boys: [] };
-            const girlsList = data.girls.map((g, idx) => ({ student: g, originalIndex: idx + 1 }));
-            const boysList = data.boys.map((b, idx) => ({ student: b, originalIndex: idx + 1 }));
-            const totalStudents = girlsList.length + boysList.length;
+            
+            // Primary and Secondary groups according to sectionOrder
+            const primaryIsGirls = sectionOrder === 'girls-first';
+            const firstRaw = primaryIsGirls ? data.girls : data.boys;
+            const secondRaw = primaryIsGirls ? data.boys : data.girls;
+            const firstTitle = primaryIsGirls ? 'Girls' : 'Boys';
+            const secondTitle = primaryIsGirls ? 'Boys' : 'Girls';
+            const firstType: 'girls' | 'boys' = primaryIsGirls ? 'girls' : 'boys';
+            const secondType: 'girls' | 'boys' = primaryIsGirls ? 'boys' : 'girls';
 
+            // Assign numbering (Sectional 01..N or Continuous 01..Total)
+            let firstList: { student: StudentItem; displayIndex: number }[] = [];
+            let secondList: { student: StudentItem; displayIndex: number }[] = [];
+
+            if (numberingMode === 'sectional') {
+                firstList = firstRaw.map((s, idx) => ({ student: s, displayIndex: idx + 1 }));
+                secondList = secondRaw.map((s, idx) => ({ student: s, displayIndex: idx + 1 }));
+            } else {
+                firstList = firstRaw.map((s, idx) => ({ student: s, displayIndex: idx + 1 }));
+                const offset = firstList.length;
+                secondList = secondRaw.map((s, idx) => ({ student: s, displayIndex: offset + idx + 1 }));
+            }
+
+            const totalStudents = firstList.length + secondList.length;
             const pages: ClassPageData[] = [];
 
             // If class fits on 1 page (<= rowsPerPage total students)
@@ -126,49 +185,49 @@ export default function ClassRosterPDFModal({
                 const remainingSlots = rowsPerPage - totalStudents;
                 const sections: PageSection[] = [];
 
-                if (girlsList.length > 0 || boysList.length > 0) {
-                    if (girlsList.length > 0 && boysList.length > 0) {
-                        const blankGirls = Math.ceil(remainingSlots / 2);
-                        const blankBoys = Math.floor(remainingSlots / 2);
+                if (firstList.length > 0 || secondList.length > 0) {
+                    if (firstList.length > 0 && secondList.length > 0) {
+                        const blankFirst = Math.ceil(remainingSlots / 2);
+                        const blankSecond = Math.floor(remainingSlots / 2);
 
                         sections.push({
-                            type: 'girls',
-                            title: 'Girls',
-                            students: girlsList,
-                            blankCount: blankGirls
+                            type: firstType,
+                            title: firstTitle,
+                            students: firstList,
+                            blankCount: blankFirst
                         });
                         sections.push({
-                            type: 'boys',
-                            title: 'Boys',
-                            students: boysList,
-                            blankCount: blankBoys
+                            type: secondType,
+                            title: secondTitle,
+                            students: secondList,
+                            blankCount: blankSecond
                         });
-                    } else if (girlsList.length > 0) {
+                    } else if (firstList.length > 0) {
                         sections.push({
-                            type: 'girls',
-                            title: 'Girls',
-                            students: girlsList,
+                            type: firstType,
+                            title: firstTitle,
+                            students: firstList,
                             blankCount: remainingSlots
                         });
                     } else {
                         sections.push({
-                            type: 'boys',
-                            title: 'Boys',
-                            students: boysList,
+                            type: secondType,
+                            title: secondTitle,
+                            students: secondList,
                             blankCount: remainingSlots
                         });
                     }
                 } else {
-                    // Empty class: split 20 blank rows between Girls and Boys
+                    // Empty class: split blank rows between sections
                     sections.push({
-                        type: 'girls',
-                        title: 'Girls',
+                        type: firstType,
+                        title: firstTitle,
                         students: [],
                         blankCount: Math.ceil(rowsPerPage / 2)
                     });
                     sections.push({
-                        type: 'boys',
-                        title: 'Boys',
+                        type: secondType,
+                        title: secondTitle,
                         students: [],
                         blankCount: Math.floor(rowsPerPage / 2)
                     });
@@ -181,45 +240,45 @@ export default function ClassRosterPDFModal({
                     sections
                 });
             } else {
-                // Multi-page class pagination (20 slots per page)
-                let gIndex = 0;
-                let bIndex = 0;
+                // Multi-page class pagination (rowsPerPage slots per page)
+                let fIndex = 0;
+                let sIndex = 0;
 
-                while (gIndex < girlsList.length || bIndex < boysList.length) {
+                while (fIndex < firstList.length || sIndex < secondList.length) {
                     let pageRemainingSlots = rowsPerPage;
                     const sections: PageSection[] = [];
 
-                    // Fill girls if available
-                    if (gIndex < girlsList.length) {
-                        const canTakeG = Math.min(pageRemainingSlots, girlsList.length - gIndex);
-                        const gSlice = girlsList.slice(gIndex, gIndex + canTakeG);
-                        gIndex += canTakeG;
-                        pageRemainingSlots -= canTakeG;
+                    // Fill first section if available
+                    if (fIndex < firstList.length) {
+                        const canTakeF = Math.min(pageRemainingSlots, firstList.length - fIndex);
+                        const fSlice = firstList.slice(fIndex, fIndex + canTakeF);
+                        fIndex += canTakeF;
+                        pageRemainingSlots -= canTakeF;
 
                         sections.push({
-                            type: 'girls',
-                            title: 'Girls',
-                            students: gSlice,
+                            type: firstType,
+                            title: fIndex > canTakeF ? `${firstTitle} (Cont.)` : firstTitle,
+                            students: fSlice,
                             blankCount: 0
                         });
                     }
 
-                    // Fill boys if slots remain and boys available
-                    if (pageRemainingSlots > 0 && bIndex < boysList.length) {
-                        const canTakeB = Math.min(pageRemainingSlots, boysList.length - bIndex);
-                        const bSlice = boysList.slice(bIndex, bIndex + canTakeB);
-                        bIndex += canTakeB;
-                        pageRemainingSlots -= canTakeB;
+                    // Fill second section if slots remain
+                    if (pageRemainingSlots > 0 && sIndex < secondList.length) {
+                        const canTakeS = Math.min(pageRemainingSlots, secondList.length - sIndex);
+                        const sSlice = secondList.slice(sIndex, sIndex + canTakeS);
+                        sIndex += canTakeS;
+                        pageRemainingSlots -= canTakeS;
 
                         sections.push({
-                            type: 'boys',
-                            title: 'Boys',
-                            students: bSlice,
+                            type: secondType,
+                            title: sIndex > canTakeS ? `${secondTitle} (Cont.)` : secondTitle,
+                            students: sSlice,
                             blankCount: 0
                         });
                     }
 
-                    // If it's the last page and still has remaining slots, pad with blanks up to rowsPerPage
+                    // Pad remaining slots with blanks on final page
                     if (pageRemainingSlots > 0) {
                         if (sections.length > 0) {
                             sections[sections.length - 1].blankCount += pageRemainingSlots;
@@ -229,7 +288,7 @@ export default function ClassRosterPDFModal({
                     pages.push({
                         className: cls,
                         pageNumber: pages.length + 1,
-                        totalPages: 1, // updated below
+                        totalPages: 1,
                         sections
                     });
                 }
@@ -244,7 +303,7 @@ export default function ClassRosterPDFModal({
         });
 
         return pagesMap;
-    }, [classStudentsMap, classes, rowsPerPage]);
+    }, [classStudentsMap, classes, rowsPerPage, sectionOrder, numberingMode]);
 
     if (!isOpen) return null;
 
@@ -288,7 +347,7 @@ export default function ClassRosterPDFModal({
 
                     // Real Student Rows
                     section.students.forEach(item => {
-                        const sNo = String(item.originalIndex).padStart(2, '0') + '.';
+                        const sNo = String(item.displayIndex).padStart(2, '0') + '.';
                         const sName = item.student.full_name || '';
                         const fName = item.student.father_name || item.student.raw?.guardian_name || item.student.raw?.father_name || '';
                         tableRowsHtml += `
@@ -813,6 +872,165 @@ export default function ClassRosterPDFModal({
                             </div>
                         </div>
 
+                        {/* Girls & Boys Arrangement Card */}
+                        <div style={{
+                            padding: '12px',
+                            background: '#f8fafc',
+                            borderRadius: '12px',
+                            border: '1px solid #e2e8f0',
+                            display: 'flex',
+                            flexDirection: 'column',
+                            gap: '10px'
+                        }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                <label style={{ fontSize: '0.75rem', fontWeight: 800, color: '#0f172a', textTransform: 'uppercase' }}>
+                                    Gender Arrangement
+                                </label>
+                                <span style={{ fontSize: '0.65rem', background: '#dbeafe', color: '#1e40af', padding: '2px 6px', borderRadius: '4px', fontWeight: 700 }}>
+                                    Every Class
+                                </span>
+                            </div>
+
+                            {/* Section Order */}
+                            <div>
+                                <span style={{ fontSize: '0.7rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '4px' }}>
+                                    Section Order
+                                </span>
+                                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px' }}>
+                                    <button
+                                        onClick={() => setSectionOrder('girls-first')}
+                                        style={{
+                                            padding: '6px 4px',
+                                            borderRadius: '8px',
+                                            border: '1px solid #cbd5e1',
+                                            background: sectionOrder === 'girls-first' ? '#08213d' : '#ffffff',
+                                            color: sectionOrder === 'girls-first' ? '#ffffff' : '#334155',
+                                            fontWeight: 700,
+                                            fontSize: '0.72rem',
+                                            cursor: 'pointer'
+                                        }}
+                                    >
+                                        👧 Girls First
+                                    </button>
+                                    <button
+                                        onClick={() => setSectionOrder('boys-first')}
+                                        style={{
+                                            padding: '6px 4px',
+                                            borderRadius: '8px',
+                                            border: '1px solid #cbd5e1',
+                                            background: sectionOrder === 'boys-first' ? '#08213d' : '#ffffff',
+                                            color: sectionOrder === 'boys-first' ? '#ffffff' : '#334155',
+                                            fontWeight: 700,
+                                            fontSize: '0.72rem',
+                                            cursor: 'pointer'
+                                        }}
+                                    >
+                                        👦 Boys First
+                                    </button>
+                                </div>
+                            </div>
+
+                            {/* Numbering Mode */}
+                            <div>
+                                <span style={{ fontSize: '0.7rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '4px' }}>
+                                    Serial Numbering (S.No)
+                                </span>
+                                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px' }}>
+                                    <button
+                                        onClick={() => setNumberingMode('sectional')}
+                                        style={{
+                                            padding: '6px 4px',
+                                            borderRadius: '8px',
+                                            border: '1px solid #cbd5e1',
+                                            background: numberingMode === 'sectional' ? '#08213d' : '#ffffff',
+                                            color: numberingMode === 'sectional' ? '#ffffff' : '#334155',
+                                            fontWeight: 700,
+                                            fontSize: '0.72rem',
+                                            cursor: 'pointer'
+                                        }}
+                                    >
+                                        01, 02.. per Section
+                                    </button>
+                                    <button
+                                        onClick={() => setNumberingMode('continuous')}
+                                        style={{
+                                            padding: '6px 4px',
+                                            borderRadius: '8px',
+                                            border: '1px solid #cbd5e1',
+                                            background: numberingMode === 'continuous' ? '#08213d' : '#ffffff',
+                                            color: numberingMode === 'continuous' ? '#ffffff' : '#334155',
+                                            fontWeight: 700,
+                                            fontSize: '0.72rem',
+                                            cursor: 'pointer'
+                                        }}
+                                    >
+                                        01..N Continuous
+                                    </button>
+                                </div>
+                            </div>
+
+                            {/* Sort Mode */}
+                            <div>
+                                <span style={{ fontSize: '0.7rem', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '4px' }}>
+                                    Sorting within Section
+                                </span>
+                                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px' }}>
+                                    <button
+                                        onClick={() => setSortOption('name-asc')}
+                                        style={{
+                                            padding: '6px 4px',
+                                            borderRadius: '8px',
+                                            border: '1px solid #cbd5e1',
+                                            background: sortOption === 'name-asc' ? '#08213d' : '#ffffff',
+                                            color: sortOption === 'name-asc' ? '#ffffff' : '#334155',
+                                            fontWeight: 700,
+                                            fontSize: '0.72rem',
+                                            cursor: 'pointer'
+                                        }}
+                                    >
+                                        Name (A-Z)
+                                    </button>
+                                    <button
+                                        onClick={() => setSortOption('id-asc')}
+                                        style={{
+                                            padding: '6px 4px',
+                                            borderRadius: '8px',
+                                            border: '1px solid #cbd5e1',
+                                            background: sortOption === 'id-asc' ? '#08213d' : '#ffffff',
+                                            color: sortOption === 'id-asc' ? '#ffffff' : '#334155',
+                                            fontWeight: 700,
+                                            fontSize: '0.72rem',
+                                            cursor: 'pointer'
+                                        }}
+                                    >
+                                        Student ID / Roll
+                                    </button>
+                                </div>
+                            </div>
+
+                            {/* Button to open Student Gender Arranger */}
+                            <button
+                                onClick={() => setShowStudentArranger(true)}
+                                style={{
+                                    marginTop: '4px',
+                                    padding: '8px 10px',
+                                    borderRadius: '8px',
+                                    border: '1px solid #93c5fd',
+                                    background: '#eff6ff',
+                                    color: '#1d4ed8',
+                                    fontWeight: 700,
+                                    fontSize: '0.75rem',
+                                    cursor: 'pointer',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'center',
+                                    gap: '6px'
+                                }}
+                            >
+                                <span>👥</span> Arrange & Verify Students ({previewClass})
+                            </button>
+                        </div>
+
                         {/* Page Capacity Configuration */}
                         <div>
                             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
@@ -881,9 +1099,10 @@ export default function ClassRosterPDFModal({
                         flexDirection: 'column',
                         alignItems: 'center',
                         gap: '16px',
-                        background: '#e2e8f0'
+                        background: '#e2e8f0',
+                        position: 'relative'
                     }}>
-                        {/* Class Preview Selector Tabs */}
+                        {/* Class Preview Selector & Gender Stats Bar */}
                         <div style={{
                             display: 'flex',
                             alignItems: 'center',
@@ -927,6 +1146,27 @@ export default function ClassRosterPDFModal({
                                         {cls}
                                     </button>
                                 ))}
+                            </div>
+
+                            {/* Class Gender breakdown pill */}
+                            <div style={{
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '8px',
+                                background: '#ffffff',
+                                padding: '6px 12px',
+                                borderRadius: '14px',
+                                boxShadow: '0 2px 8px rgba(0,0,0,0.06)',
+                                fontSize: '0.72rem',
+                                fontWeight: 700
+                            }}>
+                                <span style={{ color: '#ec4899', display: 'flex', alignItems: 'center', gap: '3px' }}>
+                                    👧 {classStudentsMap[previewClass]?.girls.length || 0} Girls
+                                </span>
+                                <span style={{ color: '#cbd5e1' }}>|</span>
+                                <span style={{ color: '#2563eb', display: 'flex', alignItems: 'center', gap: '3px' }}>
+                                    👦 {classStudentsMap[previewClass]?.boys.length || 0} Boys
+                                </span>
                             </div>
 
                             {/* Page switcher if class has > 1 page */}
@@ -1049,7 +1289,7 @@ export default function ClassRosterPDFModal({
                                             {sec.students.map((item, idx) => (
                                                 <tr key={`std-${item.student.id || idx}`}>
                                                     <td style={{ padding: '5.5px 8px', fontSize: '0.85rem', fontWeight: 600, color: '#08213d', textAlign: 'center', border: '1px solid #7a94b5', height: '31.5px' }}>
-                                                        {String(item.originalIndex).padStart(2, '0')}.
+                                                        {String(item.displayIndex).padStart(2, '0')}.
                                                     </td>
                                                     <td style={{ padding: '5.5px 12px', fontSize: '0.85rem', fontWeight: 600, color: '#0f172a', border: '1px solid #7a94b5', height: '31.5px' }}>
                                                         {item.student.full_name}
@@ -1074,6 +1314,198 @@ export default function ClassRosterPDFModal({
                             </table>
 
                         </div>
+
+                        {/* Student Gender Arranger Modal / Drawer */}
+                        {showStudentArranger && (
+                            <div style={{
+                                position: 'fixed',
+                                top: 0,
+                                left: 0,
+                                right: 0,
+                                bottom: 0,
+                                background: 'rgba(0, 0, 0, 0.5)',
+                                zIndex: 100000,
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                padding: '20px'
+                            }}>
+                                <div style={{
+                                    background: '#ffffff',
+                                    borderRadius: '16px',
+                                    width: '600px',
+                                    maxWidth: '95vw',
+                                    maxHeight: '85vh',
+                                    display: 'flex',
+                                    flexDirection: 'column',
+                                    boxShadow: '0 20px 40px rgba(0,0,0,0.25)',
+                                    overflow: 'hidden'
+                                }}>
+                                    {/* Modal Header */}
+                                    <div style={{
+                                        padding: '16px 20px',
+                                        background: '#08213d',
+                                        color: '#ffffff',
+                                        display: 'flex',
+                                        justifyContent: 'space-between',
+                                        alignItems: 'center'
+                                    }}>
+                                        <div>
+                                            <h3 style={{ margin: 0, fontSize: '1rem', fontWeight: 800 }}>
+                                                Arrange Students: {previewClass}
+                                            </h3>
+                                            <p style={{ margin: '2px 0 0 0', fontSize: '0.72rem', color: '#93c5fd' }}>
+                                                Click any badge to toggle between Girl (👧) and Boy (👦).
+                                            </p>
+                                        </div>
+                                        <button
+                                            onClick={() => setShowStudentArranger(false)}
+                                            style={{
+                                                background: 'transparent',
+                                                border: 'none',
+                                                color: '#ffffff',
+                                                fontSize: '1.25rem',
+                                                cursor: 'pointer'
+                                            }}
+                                        >
+                                            ✕
+                                        </button>
+                                    </div>
+
+                                    {/* Modal Toolbar */}
+                                    <div style={{
+                                        padding: '12px 20px',
+                                        background: '#f8fafc',
+                                        borderBottom: '1px solid #e2e8f0',
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        gap: '10px'
+                                    }}>
+                                        <input
+                                            type="text"
+                                            placeholder="Search student in this class..."
+                                            value={arrangerSearch}
+                                            onChange={e => setArrangerSearch(e.target.value)}
+                                            style={{
+                                                flex: 1,
+                                                padding: '7px 12px',
+                                                borderRadius: '8px',
+                                                border: '1px solid #cbd5e1',
+                                                fontSize: '0.8rem'
+                                            }}
+                                        />
+                                        <button
+                                            onClick={() => handleResetClassOverrides(previewClass)}
+                                            style={{
+                                                padding: '7px 12px',
+                                                borderRadius: '8px',
+                                                border: '1px solid #cbd5e1',
+                                                background: '#ffffff',
+                                                color: '#475569',
+                                                fontSize: '0.75rem',
+                                                fontWeight: 700,
+                                                cursor: 'pointer',
+                                                whiteSpace: 'nowrap'
+                                            }}
+                                        >
+                                            Reset to Auto
+                                        </button>
+                                    </div>
+
+                                    {/* Student List */}
+                                    <div style={{
+                                        padding: '12px 20px',
+                                        overflowY: 'auto',
+                                        flex: 1,
+                                        display: 'flex',
+                                        flexDirection: 'column',
+                                        gap: '6px'
+                                    }}>
+                                        {students
+                                            .filter(s => s.grade === previewClass)
+                                            .filter(s => !arrangerSearch || (s.full_name || '').toLowerCase().includes(arrangerSearch.toLowerCase()) || (s.father_name || '').toLowerCase().includes(arrangerSearch.toLowerCase()))
+                                            .map(s => {
+                                                const isGirl = isFemaleStudent(s, genderOverrides);
+                                                const isOverridden = Boolean(genderOverrides[s.id]);
+                                                return (
+                                                    <div
+                                                        key={s.id}
+                                                        style={{
+                                                            display: 'flex',
+                                                            alignItems: 'center',
+                                                            justifyContent: 'space-between',
+                                                            padding: '8px 12px',
+                                                            borderRadius: '8px',
+                                                            background: isGirl ? '#fdf2f8' : '#eff6ff',
+                                                            border: isGirl ? '1px solid #fbcfe8' : '1px solid #bfdbfe'
+                                                        }}
+                                                    >
+                                                        <div>
+                                                            <div style={{ fontSize: '0.82rem', fontWeight: 700, color: '#0f172a' }}>
+                                                                {s.full_name}
+                                                            </div>
+                                                            <div style={{ fontSize: '0.7rem', color: '#64748b' }}>
+                                                                S/O, D/O: {s.father_name || s.raw?.father_name || 'N/A'} {s.student_id ? `• ID: ${s.student_id}` : ''}
+                                                            </div>
+                                                        </div>
+
+                                                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                                            {isOverridden && (
+                                                                <span style={{ fontSize: '0.65rem', color: '#f59e0b', fontWeight: 700, background: '#fef3c7', padding: '2px 5px', borderRadius: '4px' }}>
+                                                                    Custom
+                                                                </span>
+                                                            )}
+                                                            <button
+                                                                onClick={() => handleToggleGender(s.id, isGirl)}
+                                                                style={{
+                                                                    padding: '5px 12px',
+                                                                    borderRadius: '20px',
+                                                                    border: 'none',
+                                                                    background: isGirl ? '#db2777' : '#2563eb',
+                                                                    color: '#ffffff',
+                                                                    fontWeight: 800,
+                                                                    fontSize: '0.75rem',
+                                                                    cursor: 'pointer',
+                                                                    display: 'flex',
+                                                                    alignItems: 'center',
+                                                                    gap: '4px'
+                                                                }}
+                                                            >
+                                                                {isGirl ? '👧 Girl' : '👦 Boy'}
+                                                            </button>
+                                                        </div>
+                                                    </div>
+                                                );
+                                            })}
+                                    </div>
+
+                                    {/* Modal Footer */}
+                                    <div style={{
+                                        padding: '12px 20px',
+                                        background: '#f8fafc',
+                                        borderTop: '1px solid #e2e8f0',
+                                        display: 'flex',
+                                        justifyContent: 'flex-end'
+                                    }}>
+                                        <button
+                                            onClick={() => setShowStudentArranger(false)}
+                                            style={{
+                                                padding: '8px 18px',
+                                                borderRadius: '8px',
+                                                border: 'none',
+                                                background: '#08213d',
+                                                color: '#ffffff',
+                                                fontSize: '0.8rem',
+                                                fontWeight: 800,
+                                                cursor: 'pointer'
+                                            }}
+                                        >
+                                            Done
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
                     </div>
 
                 </div>
