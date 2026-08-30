@@ -3,6 +3,7 @@ import { useState, useEffect, useMemo } from 'react';
 import FeeLayout from '../FeeLayout';
 import { createClient } from '@/utils/supabase/client';
 import { VoucherSlip } from '@/components/VoucherSlip';
+import ClassRosterPDFModal from '@/components/ClassRosterPDFModal';
 
 export const dynamic = 'force-dynamic';
 const supabase = createClient();
@@ -119,6 +120,7 @@ export default function FeeManagementCenter() {
 
     // Detail Sheet Generator State
     const [showReportModal, setShowReportModal] = useState(false);
+    const [showClassRosterModal, setShowClassRosterModal] = useState(false);
     const [reportConfig, setReportConfig] = useState({
         fromMonth: '2025-09',
         toMonth: '2026-08',
@@ -801,6 +803,29 @@ export default function FeeManagementCenter() {
                                 <option value="OVERDUE">Overdue</option>
                             </select>
 
+                            {/* Class Roster A4 PDF Generator */}
+                            <button
+                                onClick={() => setShowClassRosterModal(true)}
+                                style={{
+                                    padding: '10px 16px',
+                                    borderRadius: '12px',
+                                    border: 'none',
+                                    background: '#08213d',
+                                    color: '#fff',
+                                    fontWeight: 800,
+                                    fontSize: '0.75rem',
+                                    cursor: 'pointer',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    gap: '8px',
+                                    boxShadow: '0 4px 14px rgba(8, 33, 61, 0.25)',
+                                    transition: 'all 0.15s ease'
+                                }}
+                            >
+                                <span className="material-icons" style={{ fontSize: '18px', color: '#60a5fa' }}>picture_as_pdf</span>
+                                Class Rosters (PDF)
+                            </button>
+
                             {/* Detail Sheet Generator */}
                             <button
                                 onClick={() => setShowReportModal(true)}
@@ -906,6 +931,30 @@ export default function FeeManagementCenter() {
                                 </button>
                             );
                         })}
+
+                        {/* Quick Active Class PDF Trigger */}
+                        <button
+                            onClick={() => setShowClassRosterModal(true)}
+                            style={{
+                                padding: '8px 14px',
+                                borderRadius: '10px',
+                                border: '1.5px dashed #08213d',
+                                background: '#eff6ff',
+                                color: '#08213d',
+                                fontWeight: 800,
+                                fontSize: '0.75rem',
+                                cursor: 'pointer',
+                                whiteSpace: 'nowrap',
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '6px',
+                                marginLeft: 'auto'
+                            }}
+                            title="Export Class Roster PDF (Standard A4)"
+                        >
+                            <span className="material-icons" style={{ fontSize: '16px', color: '#2563eb' }}>picture_as_pdf</span>
+                            Export {selectedClass === 'all' ? 'All Classes' : selectedClass} PDF
+                        </button>
                     </div>
 
                     {/* Student Records Data Table */}
@@ -2387,6 +2436,15 @@ export default function FeeManagementCenter() {
                         </div>
                     </div>
                 )}
+
+                {/* EXACT FORMAT CLASS ROSTER PDF GENERATOR MODAL */}
+                <ClassRosterPDFModal
+                    isOpen={showClassRosterModal}
+                    onClose={() => setShowClassRosterModal(false)}
+                    students={students}
+                    classes={classes}
+                    defaultClass={selectedClass}
+                />
             </div>
         </FeeLayout>
     );

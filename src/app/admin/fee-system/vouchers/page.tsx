@@ -120,18 +120,29 @@ export default function GenerateVouchers() {
             if (vError) throw vError;
 
             if (rawVouchers && rawVouchers.length > 0) {
-                const studentIds = Array.from(new Set(rawVouchers.map(v => v.student_id).filter(Boolean)));
-                const { data: studentsData } = await supabase
+                // Fetch students using select('*') to prevent errors from missing columns
+                const { data: studentsData, error: sError } = await supabase
                     .from('students')
-                    .select('id, full_name, guardian_name, father_name, student_id, grade, base_fee')
-                    .in('id', studentIds);
+                    .select('*');
 
-                const studentMap = Object.fromEntries(studentsData?.map(s => [s.id, s]) || []);
+                if (sError) console.error('Students fetch error:', sError);
+
+                const studentMap: Record<string, any> = {};
+                studentsData?.forEach(s => {
+                    if (s.id) studentMap[s.id] = s;
+                    if (s.student_id) studentMap[s.student_id] = s;
+                });
                 
-                const enriched = rawVouchers.map(v => ({
-                    ...v,
-                    students: studentMap[v.student_id] || null
-                }));
+                const enriched = rawVouchers.map(v => {
+                    const std = studentMap[v.student_id] || studentMap[v.studentId] || null;
+                    return {
+                        ...v,
+                        students: std,
+                        studentName: std?.full_name || '',
+                        fatherName: std?.guardian_name || std?.father_name || '',
+                        className: v.class_name || std?.grade || 'General'
+                    };
+                });
                 
                 setAllVouchers(enriched);
             } else {
@@ -351,17 +362,31 @@ export default function GenerateVouchers() {
         let enrichedItems: any[] = [];
         if (rawItems && rawItems.length > 0) {
             const catIds = Array.from(new Set(rawItems.map(i => i.fee_category_id).filter(Boolean)));
-            const { data: cats } = await supabase.from('fee_categories').select('id, name').in('id', catIds);
+            const { data: cats } = catIds.length > 0 ? await supabase.from('fee_categories').select('id, name').in('id', catIds) : { data: [] };
+            
             const feeIds = Array.from(new Set(rawItems.map(i => i.student_fee_id).filter(Boolean)));
-            const { data: fees } = await supabase.from('student_fees').select('id, month').in('id', feeIds);
-            enrichedItems = rawItems.map(item => ({
-                ...item,
-                fee_categories: cats?.find(c => c.id === item.fee_category_id) || { name: 'Institutional Fee' },
-                student_fees: fees?.find(f => f.id === item.student_fee_id) || { month: 'Current' }
-            }));
+            const { data: fees } = feeIds.length > 0 ? await supabase.from('student_fees').select('id, month, amount, notes, fee_category_id').in('id', feeIds) : { data: [] };
+            
+            const catsMap = new Map(cats?.map(c => [c.id, c]) || []);
+            const feesMap = new Map(fees?.map(f => [f.id, f]) || []);
+
+            enrichedItems = rawItems.map(item => {
+                const feeObj = feesMap.get(item.student_fee_id);
+                const catObj = catsMap.get(item.fee_category_id);
+                return {
+                    ...item,
+                    fee_categories: catObj || { name: 'Institutional Fee' },
+                    student_fees: feeObj || { month: 'Current' },
+                    month: feeObj?.month || 'Current'
+                };
+            });
         }
-        // 2. Fetch Student
-        const { data: stdData } = await supabase.from('students').select('*').eq('id', v.student_id).single();
+        // 2. Fetch Student data safely
+        let stdData = v.students;
+        if (!stdData) {
+            const { data: s } = await supabase.from('students').select('*').or(`id.eq.${v.student_id},student_id.eq.${v.student_id}`).maybeSingle();
+            stdData = s;
+        }
         return { items: enrichedItems, student: stdData };
     };
 
@@ -569,34 +594,69 @@ export default function GenerateVouchers() {
 
             const vIds = matchedVouchers.map(v => v.id);
 
-            // 2. Fetch all voucher items with category and student fee details in chunks of 500
-            let allItems: any[] = [];
+            // 2. Fetch raw items for matched vouchers in chunks of 500
+            let allRawItems: any[] = [];
             for (let i = 0; i < vIds.length; i += 500) {
                 const chunk = vIds.slice(i, i + 500);
                 const { data: itemsChunk, error: itemsErr } = await supabase
                     .from('fee_voucher_items')
-                    .select('*, fee_categories(name), student_fees(month, amount)')
+                    .select('*')
                     .in('voucher_id', chunk);
 
                 if (itemsErr) {
                     console.error('Error fetching report items chunk:', itemsErr);
                 } else if (itemsChunk) {
-                    allItems = [...allItems, ...itemsChunk];
+                    allRawItems = [...allRawItems, ...itemsChunk];
                 }
+            }
+
+            // 3. Fetch referenced fee_categories and student_fees separately for 100% data reliability
+            const allCatIds = Array.from(new Set(allRawItems.map(i => i.fee_category_id).filter(Boolean)));
+            const allFeeIds = Array.from(new Set(allRawItems.map(i => i.student_fee_id).filter(Boolean)));
+
+            const { data: catsData } = allCatIds.length > 0
+                ? await supabase.from('fee_categories').select('id, name').in('id', allCatIds)
+                : { data: [] };
+            const catsMap = new Map(catsData?.map(c => [c.id, c]) || []);
+
+            let allFeesData: any[] = [];
+            for (let i = 0; i < allFeeIds.length; i += 500) {
+                const feeChunk = allFeeIds.slice(i, i + 500);
+                const { data: fData } = await supabase.from('student_fees').select('id, month, amount, notes, fee_category_id').in('id', feeChunk);
+                if (fData) allFeesData = [...allFeesData, ...fData];
+            }
+            const feesMap = new Map(allFeesData.map(f => [f.id, f]));
+
+            // Ensure students map is complete if any matched voucher doesn't have students
+            const missingStudentIds = matchedVouchers.filter(v => !v.students).map(v => v.student_id).filter(Boolean);
+            let extraStudentsMap = new Map<string, any>();
+            if (missingStudentIds.length > 0) {
+                const { data: extraStudents } = await supabase.from('students').select('*').in('id', missingStudentIds);
+                extraStudents?.forEach(s => {
+                    extraStudentsMap.set(s.id, s);
+                    if (s.student_id) extraStudentsMap.set(s.student_id, s);
+                });
             }
 
             // Group items by voucher_id
             const itemsByVoucher = new Map<string, any[]>();
-            allItems.forEach(item => {
+            allRawItems.forEach(item => {
+                const feeObj = feesMap.get(item.student_fee_id);
+                const enrichedItem = {
+                    ...item,
+                    fee_categories: catsMap.get(item.fee_category_id) || { name: 'Institutional Fee' },
+                    student_fees: feeObj || null,
+                    month: feeObj?.month || ''
+                };
                 const list = itemsByVoucher.get(item.voucher_id) || [];
-                list.push(item);
+                list.push(enrichedItem);
                 itemsByVoucher.set(item.voucher_id, list);
             });
 
-            // 3. Process each voucher into student record
+            // 4. Process each voucher into student record
             const processedRecords = matchedVouchers.map(v => {
                 const items = itemsByVoucher.get(v.id) || [];
-                const std = v.students || {};
+                const std = v.students || extraStudentsMap.get(v.student_id) || {};
 
                 // Extract monthly base fee
                 let monthlyFee = Number(std.base_fee || 0);
@@ -612,14 +672,16 @@ export default function GenerateVouchers() {
                     }
                 }
 
-                // Extract month names & fees
+                // Extract month names & categories
                 const monthNamesSet = new Set<string>();
                 const otherCategoriesSet = new Set<string>();
 
                 items.forEach(it => {
                     const catName = it.fee_categories?.name || '';
                     const m = it.student_fees?.month || it.month || '';
-                    if (m) monthNamesSet.add(m);
+                    if (m && m !== 'Current') {
+                        monthNamesSet.add(m);
+                    }
                     if (!catName.toLowerCase().includes('tuition') && !catName.toLowerCase().includes('monthly') && catName) {
                         otherCategoriesSet.add(catName);
                     }
@@ -633,7 +695,16 @@ export default function GenerateVouchers() {
                         monthsSummary += ` (${uniqueMonths.length} Mos)`;
                     }
                 } else {
-                    monthsSummary = 'Current Cycle';
+                    if (v.issue_date) {
+                        try {
+                            const d = new Date(v.issue_date);
+                            monthsSummary = d.toLocaleString('default', { month: 'long', year: 'numeric' });
+                        } catch {
+                            monthsSummary = 'Current Cycle';
+                        }
+                    } else {
+                        monthsSummary = 'Current Cycle';
+                    }
                 }
 
                 if (otherCategoriesSet.size > 0) {
@@ -645,15 +716,19 @@ export default function GenerateVouchers() {
                 const paidAmount = isPaid ? voucherAmount : Number(v.paid_amount || 0);
                 const dueAmount = isPaid ? 0 : Math.max(0, voucherAmount - paidAmount);
 
+                const studentName = std.full_name || v.studentName || '---';
+                const fatherName = std.guardian_name || std.father_name || v.fatherName || '---';
+                const studentRoll = std.student_id || '---';
+
                 return {
                     voucherId: v.id,
                     voucherNumber: v.voucher_number,
                     slipNo: v.slip_no || '',
                     issueDate: v.issue_date,
                     dueDate: v.due_date,
-                    studentId: std.student_id || '---',
-                    studentName: std.full_name || 'N/A',
-                    fatherName: std.father_name || std.guardian_name || 'N/A',
+                    studentId: studentRoll,
+                    studentName: studentName,
+                    fatherName: fatherName,
                     className: v.class_name || std.grade || 'General',
                     monthlyFee: monthlyFee,
                     monthsCount: Math.max(1, uniqueMonths.length),
@@ -667,7 +742,7 @@ export default function GenerateVouchers() {
                 };
             });
 
-            // 4. Group by Class and sort
+            // 5. Group by Class and sort
             const classMap = new Map<string, any[]>();
             processedRecords.forEach(rec => {
                 const cls = rec.className || 'General';
@@ -933,10 +1008,12 @@ export default function GenerateVouchers() {
         const isPastDue = v.due_date && v.due_date < todayStr;
         
         const slipVal = (v.slip_no || '').toLowerCase();
-        const matchesSearch = v.voucher_number.toLowerCase().includes(registrySearch.toLowerCase()) || 
-                              slipVal.includes(registrySearch.toLowerCase()) ||
-                              v.students?.full_name?.toLowerCase().includes(registrySearch.toLowerCase()) ||
-                              v.students?.guardian_name?.toLowerCase().includes(registrySearch.toLowerCase());
+        const sName = (v.students?.full_name || v.studentName || '').toLowerCase();
+        const gName = (v.students?.guardian_name || v.students?.father_name || v.fatherName || '').toLowerCase();
+        const sId = (v.students?.student_id || '').toLowerCase();
+        const vNo = (v.voucher_number || '').toLowerCase();
+        const q = registrySearch.toLowerCase().trim();
+        const matchesSearch = !q || vNo.includes(q) || slipVal.includes(q) || sName.includes(q) || gName.includes(q) || sId.includes(q);
 
         let matchesStatus = true;
         if (registryStatus === 'unpaid') matchesStatus = v.status === 'unpaid';
@@ -990,6 +1067,8 @@ export default function GenerateVouchers() {
 
         // Robust student data access
         const studentData = student || voucher?.students || voucher?.student || {};
+        const studentFullName = studentData.full_name || voucher?.studentName || '---';
+        const fatherFullName = studentData.guardian_name || studentData.father_name || voucher?.fatherName || '---';
 
         const formatDate = (dateStr: string) => {
             if (!dateStr) return 'N/A';
@@ -1051,11 +1130,11 @@ export default function GenerateVouchers() {
                     )}
                     <div style={{ marginBottom: '6px', display: 'flex', alignItems: 'baseline' }}>
                         <span style={{ fontWeight: 800, width: '120px', flexShrink: 0, color: '#333' }}>Student Name:</span> 
-                        <span style={{ fontWeight: 950, fontSize: '1.1rem', textTransform: 'uppercase', color: '#000', borderBottom: '1px solid #eee', flex: 1, paddingRight: isDefaulter ? '100px' : '0' }}>{studentData.full_name || '---'}</span>
+                        <span style={{ fontWeight: 950, fontSize: '1.1rem', textTransform: 'uppercase', color: '#000', borderBottom: '1px solid #eee', flex: 1, paddingRight: isDefaulter ? '100px' : '0' }}>{studentFullName}</span>
                     </div>
                     <div style={{ marginBottom: '6px', display: 'flex', alignItems: 'baseline' }}>
                         <span style={{ fontWeight: 800, width: '120px', flexShrink: 0, color: '#333' }}>Father Name:</span> 
-                        <span style={{ fontWeight: 900, fontSize: '0.95rem', color: '#000', borderBottom: '1px solid #eee', flex: 1 }}>{studentData.guardian_name || '---'}</span>
+                        <span style={{ fontWeight: 900, fontSize: '0.95rem', color: '#000', borderBottom: '1px solid #eee', flex: 1 }}>{fatherFullName}</span>
                     </div>
                     <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '4px' }}>
                         <div style={{ display: 'flex', alignItems: 'baseline' }}>
@@ -1431,8 +1510,8 @@ export default function GenerateVouchers() {
                                                 <span style={{ color: '#cbd5e1', fontSize: '0.75rem', fontWeight: 600 }}>---</span>
                                             )}
                                         </td>
-                                        <td style={{ padding: '12px 16px', fontWeight: 700, fontSize: '0.85rem', color: '#0f172a' }}>{v.students?.full_name || '---'}</td>
-                                        <td style={{ padding: '12px 16px', fontSize: '0.75rem', color: '#64748b', fontWeight: 600 }}>{v.students?.guardian_name || '---'}</td>
+                                        <td style={{ padding: '12px 16px', fontWeight: 700, fontSize: '0.85rem', color: '#0f172a' }}>{v.students?.full_name || v.studentName || '---'}</td>
+                                        <td style={{ padding: '12px 16px', fontSize: '0.75rem', color: '#64748b', fontWeight: 600 }}>{v.students?.guardian_name || v.students?.father_name || v.fatherName || '---'}</td>
                                         <td style={{ padding: '12px 16px', fontSize: '0.75rem', fontWeight: 700, color: '#0f172a' }}>{v.class_name}</td>
                                         <td style={{ padding: '12px 16px', fontSize: '0.75rem', color: '#64748b', fontWeight: 600 }}>{v.issue_date ? (() => {
                                             const d = new Date(v.issue_date);
