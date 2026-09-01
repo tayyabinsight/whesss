@@ -92,9 +92,44 @@ export default function ClassRosterPDFModal({
     const [sectionOrder, setSectionOrder] = useState<'girls-first' | 'boys-first'>('girls-first');
     const [numberingMode, setNumberingMode] = useState<'sectional' | 'continuous'>('sectional');
     const [sortOption, setSortOption] = useState<'name-asc' | 'id-asc' | 'original'>('name-asc');
+    
+    // Custom Student Management States
+    const [customAddedStudents, setCustomAddedStudents] = useState<StudentItem[]>([]);
+    const [excludedStudentIds, setExcludedStudentIds] = useState<string[]>([]);
     const [genderOverrides, setGenderOverrides] = useState<Record<string, 'girl' | 'boy'>>({});
-    const [showStudentArranger, setShowStudentArranger] = useState<boolean>(false);
-    const [arrangerSearch, setArrangerSearch] = useState<string>('');
+    const [editedStudentDetails, setEditedStudentDetails] = useState<Record<string, { full_name?: string; father_name?: string }>>({});
+    
+    // Student Manager Modal States
+    const [showStudentManager, setShowStudentManager] = useState<boolean>(false);
+    const [managerTab, setManagerTab] = useState<'all' | 'girls' | 'boys' | 'excluded' | 'add'>('all');
+    const [managerSearch, setManagerSearch] = useState<string>('');
+    const [editingStudentId, setEditingStudentId] = useState<string | null>(null);
+    const [editingForm, setEditingForm] = useState<{ full_name: string; father_name: string }>({ full_name: '', father_name: '' });
+    
+    // Add Student Form State
+    const [newStudentForm, setNewStudentForm] = useState<{
+        full_name: string;
+        father_name: string;
+        gender: 'girl' | 'boy';
+        grade: string;
+        student_id: string;
+    }>({
+        full_name: '',
+        father_name: '',
+        gender: 'girl',
+        grade: previewClass || (classes[0] || ''),
+        student_id: ''
+    });
+
+    // Interactive Mode toggle on preview table
+    const [isTableInteractive, setIsTableInteractive] = useState<boolean>(false);
+
+    // Synchronize newStudentForm default grade when previewClass changes
+    const handleSelectPreviewClass = (cls: string) => {
+        setPreviewClass(cls);
+        setPreviewPageIndex(0);
+        setNewStudentForm(prev => ({ ...prev, grade: cls }));
+    };
 
     // Toggle student gender override
     const handleToggleGender = (studentId: string, currentIsFemale: boolean) => {
@@ -104,15 +139,116 @@ export default function ClassRosterPDFModal({
         }));
     };
 
-    // Reset gender overrides for current class
-    const handleResetClassOverrides = (cls: string) => {
-        const classStudentIds = students.filter(s => s.grade === cls).map(s => s.id);
-        setGenderOverrides(prev => {
-            const next = { ...prev };
-            classStudentIds.forEach(id => delete next[id]);
-            return next;
+    // Exclude / Remove student from roster
+    const handleExcludeStudent = (studentId: string) => {
+        setExcludedStudentIds(prev => prev.includes(studentId) ? prev : [...prev, studentId]);
+    };
+
+    // Restore excluded student back into roster
+    const handleRestoreStudent = (studentId: string) => {
+        setExcludedStudentIds(prev => prev.filter(id => id !== studentId));
+    };
+
+    // Add new student to roster
+    const handleAddNewStudent = (e?: React.FormEvent) => {
+        if (e) e.preventDefault();
+        if (!newStudentForm.full_name.trim()) {
+            alert('Please enter the student\'s full name.');
+            return;
+        }
+
+        const targetGrade = newStudentForm.grade || previewClass || classes[0] || 'General';
+        const newId = `custom-std-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+        const createdStudent: StudentItem = {
+            id: newId,
+            student_id: newStudentForm.student_id.trim() || `STD-${Math.floor(1000 + Math.random() * 9000)}`,
+            full_name: newStudentForm.full_name.trim(),
+            father_name: newStudentForm.father_name.trim(),
+            grade: targetGrade,
+            gender: newStudentForm.gender
+        };
+
+        setCustomAddedStudents(prev => [...prev, createdStudent]);
+        setGenderOverrides(prev => ({ ...prev, [newId]: newStudentForm.gender }));
+        
+        // Reset form
+        setNewStudentForm({
+            full_name: '',
+            father_name: '',
+            gender: newStudentForm.gender,
+            grade: targetGrade,
+            student_id: ''
+        });
+        setManagerTab('all');
+    };
+
+    // Start inline editing student
+    const handleStartEdit = (student: StudentItem) => {
+        setEditingStudentId(student.id);
+        setEditingForm({
+            full_name: student.full_name,
+            father_name: student.father_name || student.raw?.guardian_name || student.raw?.father_name || ''
         });
     };
+
+    // Save inline editing student
+    const handleSaveEdit = (studentId: string) => {
+        if (!editingForm.full_name.trim()) return;
+        setEditedStudentDetails(prev => ({
+            ...prev,
+            [studentId]: {
+                full_name: editingForm.full_name.trim(),
+                father_name: editingForm.father_name.trim()
+            }
+        }));
+        setEditingStudentId(null);
+    };
+
+    // Reset all overrides & custom modifications for current class
+    const handleResetClass = (cls: string) => {
+        if (confirm(`Reset all customizations (added students, excluded students, and gender switches) for ${cls}?`)) {
+            // Remove custom added students for this class
+            setCustomAddedStudents(prev => prev.filter(s => s.grade !== cls));
+            
+            // Remove exclusions for this class
+            const originalClassStdIds = students.filter(s => s.grade === cls).map(s => s.id);
+            setExcludedStudentIds(prev => prev.filter(id => !originalClassStdIds.includes(id)));
+            
+            // Reset gender overrides
+            setGenderOverrides(prev => {
+                const next = { ...prev };
+                originalClassStdIds.forEach(id => delete next[id]);
+                return next;
+            });
+
+            // Reset name edits
+            setEditedStudentDetails(prev => {
+                const next = { ...prev };
+                originalClassStdIds.forEach(id => delete next[id]);
+                return next;
+            });
+        }
+    };
+
+    // Combined all effective students (original + custom added with edited names)
+    const allEffectiveStudents = useMemo(() => {
+        return [...students, ...customAddedStudents].map(s => {
+            const edited = editedStudentDetails[s.id];
+            if (edited) {
+                return {
+                    ...s,
+                    full_name: edited.full_name !== undefined ? edited.full_name : s.full_name,
+                    father_name: edited.father_name !== undefined ? edited.father_name : s.father_name
+                };
+            }
+            return s;
+        });
+    }, [students, customAddedStudents, editedStudentDetails]);
+
+    // Active roster students (excluding excluded ones)
+    const activeRosterStudents = useMemo(() => {
+        return allEffectiveStudents.filter(s => !excludedStudentIds.includes(s.id));
+    }, [allEffectiveStudents, excludedStudentIds]);
 
     // Group students by class and gender with active sorting & overrides
     const classStudentsMap = useMemo(() => {
@@ -122,7 +258,7 @@ export default function ClassRosterPDFModal({
             map[cls] = { girls: [], boys: [] };
         });
 
-        students.forEach(s => {
+        activeRosterStudents.forEach(s => {
             const grade = s.grade || 'General';
             if (!map[grade]) {
                 map[grade] = { girls: [], boys: [] };
@@ -146,7 +282,7 @@ export default function ClassRosterPDFModal({
         });
 
         return map;
-    }, [students, classes, genderOverrides, sortOption]);
+    }, [activeRosterStudents, classes, genderOverrides, sortOption]);
 
     // Build paginated pages with exactly rowsPerPage (20) student/entry rows per page
     const classPagesMap = useMemo(() => {
@@ -1008,27 +1144,55 @@ export default function ClassRosterPDFModal({
                                 </div>
                             </div>
 
-                            {/* Button to open Student Gender Arranger */}
-                            <button
-                                onClick={() => setShowStudentArranger(true)}
-                                style={{
-                                    marginTop: '4px',
-                                    padding: '8px 10px',
-                                    borderRadius: '8px',
-                                    border: '1px solid #93c5fd',
-                                    background: '#eff6ff',
-                                    color: '#1d4ed8',
-                                    fontWeight: 700,
-                                    fontSize: '0.75rem',
-                                    cursor: 'pointer',
-                                    display: 'flex',
-                                    alignItems: 'center',
-                                    justifyContent: 'center',
-                                    gap: '6px'
-                                }}
-                            >
-                                <span>👥</span> Arrange & Verify Students ({previewClass})
-                            </button>
+                            {/* Button to open Student Manager */}
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginTop: '4px' }}>
+                                <button
+                                    onClick={() => {
+                                        setManagerTab('all');
+                                        setShowStudentManager(true);
+                                    }}
+                                    style={{
+                                        padding: '9px 12px',
+                                        borderRadius: '10px',
+                                        border: '1px solid #93c5fd',
+                                        background: '#eff6ff',
+                                        color: '#1d4ed8',
+                                        fontWeight: 800,
+                                        fontSize: '0.75rem',
+                                        cursor: 'pointer',
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        justifyContent: 'center',
+                                        gap: '6px',
+                                        boxShadow: '0 1px 3px rgba(37,99,235,0.1)'
+                                    }}
+                                >
+                                    <span>👥</span> Manage Students & Gender ({previewClass})
+                                </button>
+                                <button
+                                    onClick={() => {
+                                        setManagerTab('add');
+                                        setNewStudentForm(prev => ({ ...prev, grade: previewClass }));
+                                        setShowStudentManager(true);
+                                    }}
+                                    style={{
+                                        padding: '7px 10px',
+                                        borderRadius: '8px',
+                                        border: '1px dashed #cbd5e1',
+                                        background: '#ffffff',
+                                        color: '#0f172a',
+                                        fontWeight: 700,
+                                        fontSize: '0.72rem',
+                                        cursor: 'pointer',
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        justifyContent: 'center',
+                                        gap: '5px'
+                                    }}
+                                >
+                                    <span>➕</span> Add Student to {previewClass}
+                                </button>
+                            </div>
                         </div>
 
                         {/* Page Capacity Configuration */}
@@ -1072,147 +1236,272 @@ export default function ClassRosterPDFModal({
                             background: '#f1f5f9',
                             borderRadius: '14px',
                             border: '1px solid #e2e8f0',
-                            marginTop: 'auto'
+                            marginTop: 'auto',
+                            display: 'flex',
+                            flexDirection: 'column',
+                            gap: '6px'
                         }}>
-                            <div style={{ fontSize: '0.7rem', fontWeight: 800, color: '#475569', textTransform: 'uppercase', marginBottom: '6px' }}>
-                                Export Summary
+                            <div style={{ fontSize: '0.7rem', fontWeight: 800, color: '#475569', textTransform: 'uppercase', marginBottom: '2px' }}>
+                                Roster Summary
                             </div>
-                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem', marginBottom: '4px', fontWeight: 600, color: '#0f172a' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem', fontWeight: 600, color: '#0f172a' }}>
                                 <span>Total A4 Pages:</span>
                                 <span style={{ fontWeight: 800, color: '#2563eb' }}>{totalPagesToExport} Page{totalPagesToExport === 1 ? '' : 's'}</span>
                             </div>
                             <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem', fontWeight: 600, color: '#0f172a' }}>
-                                <span>Total Students:</span>
-                                <span>
-                                    {students.filter(s => activeClassesToPrint.includes(s.grade)).length} Enrolled
+                                <span>Active Students:</span>
+                                <span style={{ fontWeight: 700 }}>
+                                    {activeRosterStudents.filter(s => activeClassesToPrint.includes(s.grade)).length} Enrolled
                                 </span>
                             </div>
+                            {customAddedStudents.length > 0 && (
+                                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.7rem', color: '#16a34a', fontWeight: 700 }}>
+                                    <span>Custom Added:</span>
+                                    <span>+{customAddedStudents.length} Students</span>
+                                </div>
+                            )}
+                            {excludedStudentIds.length > 0 && (
+                                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.7rem', color: '#dc2626', fontWeight: 700 }}>
+                                    <span>Excluded / Removed:</span>
+                                    <span>-{excludedStudentIds.length} Students</span>
+                                </div>
+                            )}
                         </div>
                     </div>
 
                     {/* Right Live Interactive A4 Preview */}
                     <div style={{
                         flex: 1,
-                        padding: '24px',
+                        padding: '20px 24px',
                         overflowY: 'auto',
                         display: 'flex',
                         flexDirection: 'column',
                         alignItems: 'center',
-                        gap: '16px',
+                        gap: '14px',
                         background: '#e2e8f0',
                         position: 'relative'
                     }}>
-                        {/* Class Preview Selector & Gender Stats Bar */}
+                        {/* Class Preview Selector & Action Bar */}
                         <div style={{
                             display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'space-between',
+                            flexDirection: 'column',
                             width: '740px',
-                            gap: '8px'
+                            gap: '10px'
                         }}>
+                            {/* Class Tabs Bar */}
                             <div style={{
                                 display: 'flex',
                                 alignItems: 'center',
-                                gap: '6px',
+                                justifyContent: 'space-between',
                                 background: '#ffffff',
-                                padding: '6px 12px',
+                                padding: '8px 12px',
                                 borderRadius: '14px',
                                 boxShadow: '0 2px 8px rgba(0,0,0,0.06)',
-                                overflowX: 'auto',
-                                flex: 1
+                                gap: '8px'
                             }}>
-                                <span style={{ fontSize: '0.75rem', fontWeight: 800, color: '#64748b', textTransform: 'uppercase', paddingRight: '6px' }}>
-                                    Class:
-                                </span>
-                                {classes.map(cls => (
-                                    <button
-                                        key={cls}
-                                        onClick={() => {
-                                            setPreviewClass(cls);
-                                            setPreviewPageIndex(0);
-                                        }}
-                                        style={{
-                                            padding: '6px 12px',
-                                            borderRadius: '8px',
-                                            border: 'none',
-                                            background: previewClass === cls ? '#08213d' : '#f1f5f9',
-                                            color: previewClass === cls ? '#ffffff' : '#475569',
-                                            fontWeight: 700,
-                                            fontSize: '0.75rem',
-                                            cursor: 'pointer',
-                                            whiteSpace: 'nowrap'
-                                        }}
-                                    >
-                                        {cls}
-                                    </button>
-                                ))}
-                            </div>
-
-                            {/* Class Gender breakdown pill */}
-                            <div style={{
-                                display: 'flex',
-                                alignItems: 'center',
-                                gap: '8px',
-                                background: '#ffffff',
-                                padding: '6px 12px',
-                                borderRadius: '14px',
-                                boxShadow: '0 2px 8px rgba(0,0,0,0.06)',
-                                fontSize: '0.72rem',
-                                fontWeight: 700
-                            }}>
-                                <span style={{ color: '#ec4899', display: 'flex', alignItems: 'center', gap: '3px' }}>
-                                    👧 {classStudentsMap[previewClass]?.girls.length || 0} Girls
-                                </span>
-                                <span style={{ color: '#cbd5e1' }}>|</span>
-                                <span style={{ color: '#2563eb', display: 'flex', alignItems: 'center', gap: '3px' }}>
-                                    👦 {classStudentsMap[previewClass]?.boys.length || 0} Boys
-                                </span>
-                            </div>
-
-                            {/* Page switcher if class has > 1 page */}
-                            {currentClassPages.length > 1 && (
-                                <div style={{
-                                    display: 'flex',
-                                    alignItems: 'center',
-                                    gap: '6px',
-                                    background: '#ffffff',
-                                    padding: '6px 10px',
-                                    borderRadius: '14px',
-                                    boxShadow: '0 2px 8px rgba(0,0,0,0.06)'
-                                }}>
-                                    <span style={{ fontSize: '0.75rem', fontWeight: 700, color: '#475569' }}>
-                                        Page {previewPageIndex + 1} of {currentClassPages.length}
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '6px', overflowX: 'auto', flex: 1 }}>
+                                    <span style={{ fontSize: '0.75rem', fontWeight: 800, color: '#64748b', textTransform: 'uppercase', paddingRight: '4px' }}>
+                                        Class:
                                     </span>
+                                    {classes.map(cls => {
+                                        const count = (classStudentsMap[cls]?.girls.length || 0) + (classStudentsMap[cls]?.boys.length || 0);
+                                        return (
+                                            <button
+                                                key={cls}
+                                                onClick={() => handleSelectPreviewClass(cls)}
+                                                style={{
+                                                    padding: '6px 12px',
+                                                    borderRadius: '8px',
+                                                    border: 'none',
+                                                    background: previewClass === cls ? '#08213d' : '#f1f5f9',
+                                                    color: previewClass === cls ? '#ffffff' : '#475569',
+                                                    fontWeight: 700,
+                                                    fontSize: '0.75rem',
+                                                    cursor: 'pointer',
+                                                    whiteSpace: 'nowrap',
+                                                    display: 'flex',
+                                                    alignItems: 'center',
+                                                    gap: '4px'
+                                                }}
+                                            >
+                                                <span>{cls}</span>
+                                                <span style={{
+                                                    fontSize: '0.65rem',
+                                                    background: previewClass === cls ? 'rgba(255,255,255,0.2)' : '#e2e8f0',
+                                                    padding: '1px 5px',
+                                                    borderRadius: '10px'
+                                                }}>
+                                                    {count}
+                                                </span>
+                                            </button>
+                                        );
+                                    })}
+                                </div>
+
+                                {/* Page switcher if class has > 1 page */}
+                                {currentClassPages.length > 1 && (
+                                    <div style={{
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        gap: '6px',
+                                        background: '#f8fafc',
+                                        padding: '4px 8px',
+                                        borderRadius: '10px',
+                                        border: '1px solid #e2e8f0'
+                                    }}>
+                                        <span style={{ fontSize: '0.72rem', fontWeight: 700, color: '#475569' }}>
+                                            Pg {previewPageIndex + 1}/{currentClassPages.length}
+                                        </span>
+                                        <button
+                                            disabled={previewPageIndex === 0}
+                                            onClick={() => setPreviewPageIndex(p => Math.max(0, p - 1))}
+                                            style={{
+                                                border: '1px solid #cbd5e1',
+                                                background: '#ffffff',
+                                                borderRadius: '6px',
+                                                cursor: previewPageIndex === 0 ? 'not-allowed' : 'pointer',
+                                                opacity: previewPageIndex === 0 ? 0.4 : 1,
+                                                padding: '2px 5px',
+                                                fontSize: '0.7rem'
+                                            }}
+                                        >
+                                            ◀
+                                        </button>
+                                        <button
+                                            disabled={previewPageIndex >= currentClassPages.length - 1}
+                                            onClick={() => setPreviewPageIndex(p => Math.min(currentClassPages.length - 1, p + 1))}
+                                            style={{
+                                                border: '1px solid #cbd5e1',
+                                                background: '#ffffff',
+                                                borderRadius: '6px',
+                                                cursor: previewPageIndex >= currentClassPages.length - 1 ? 'not-allowed' : 'pointer',
+                                                opacity: previewPageIndex >= currentClassPages.length - 1 ? 0.4 : 1,
+                                                padding: '2px 5px',
+                                                fontSize: '0.7rem'
+                                            }}
+                                        >
+                                            ▶
+                                        </button>
+                                    </div>
+                                )}
+                            </div>
+
+                            {/* Secondary Quick Action Bar */}
+                            <div style={{
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'space-between',
+                                background: '#ffffff',
+                                padding: '8px 12px',
+                                borderRadius: '12px',
+                                boxShadow: '0 2px 8px rgba(0,0,0,0.06)'
+                            }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                    <div style={{
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        gap: '8px',
+                                        background: '#f8fafc',
+                                        padding: '4px 10px',
+                                        borderRadius: '8px',
+                                        border: '1px solid #e2e8f0',
+                                        fontSize: '0.72rem',
+                                        fontWeight: 700
+                                    }}>
+                                        <span style={{ color: '#ec4899', display: 'flex', alignItems: 'center', gap: '3px' }}>
+                                            👧 {classStudentsMap[previewClass]?.girls.length || 0} Girls
+                                        </span>
+                                        <span style={{ color: '#cbd5e1' }}>|</span>
+                                        <span style={{ color: '#2563eb', display: 'flex', alignItems: 'center', gap: '3px' }}>
+                                            👦 {classStudentsMap[previewClass]?.boys.length || 0} Boys
+                                        </span>
+                                    </div>
+
                                     <button
-                                        disabled={previewPageIndex === 0}
-                                        onClick={() => setPreviewPageIndex(p => Math.max(0, p - 1))}
+                                        onClick={() => {
+                                            setManagerTab('add');
+                                            setNewStudentForm(prev => ({ ...prev, grade: previewClass }));
+                                            setShowStudentManager(true);
+                                        }}
                                         style={{
+                                            padding: '5px 10px',
+                                            borderRadius: '8px',
                                             border: '1px solid #cbd5e1',
                                             background: '#f8fafc',
-                                            borderRadius: '6px',
-                                            cursor: previewPageIndex === 0 ? 'not-allowed' : 'pointer',
-                                            opacity: previewPageIndex === 0 ? 0.4 : 1,
-                                            padding: '2px 6px'
+                                            color: '#0f172a',
+                                            fontSize: '0.72rem',
+                                            fontWeight: 700,
+                                            cursor: 'pointer',
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            gap: '4px'
                                         }}
                                     >
-                                        ◀
+                                        <span>➕</span> Add Student
                                     </button>
+
                                     <button
-                                        disabled={previewPageIndex >= currentClassPages.length - 1}
-                                        onClick={() => setPreviewPageIndex(p => Math.min(currentClassPages.length - 1, p + 1))}
+                                        onClick={() => {
+                                            setManagerTab('all');
+                                            setShowStudentManager(true);
+                                        }}
                                         style={{
-                                            border: '1px solid #cbd5e1',
-                                            background: '#f8fafc',
-                                            borderRadius: '6px',
-                                            cursor: previewPageIndex >= currentClassPages.length - 1 ? 'not-allowed' : 'pointer',
-                                            opacity: previewPageIndex >= currentClassPages.length - 1 ? 0.4 : 1,
-                                            padding: '2px 6px'
+                                            padding: '5px 10px',
+                                            borderRadius: '8px',
+                                            border: '1px solid #93c5fd',
+                                            background: '#eff6ff',
+                                            color: '#1d4ed8',
+                                            fontSize: '0.72rem',
+                                            fontWeight: 700,
+                                            cursor: 'pointer',
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            gap: '4px'
                                         }}
                                     >
-                                        ▶
+                                        <span>👥</span> Manage Students & Gender
                                     </button>
                                 </div>
-                            )}
+
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                    <button
+                                        onClick={() => setIsTableInteractive(prev => !prev)}
+                                        style={{
+                                            padding: '5px 10px',
+                                            borderRadius: '8px',
+                                            border: isTableInteractive ? '1px solid #16a34a' : '1px solid #cbd5e1',
+                                            background: isTableInteractive ? '#f0fdf4' : '#ffffff',
+                                            color: isTableInteractive ? '#15803d' : '#475569',
+                                            fontSize: '0.72rem',
+                                            fontWeight: 700,
+                                            cursor: 'pointer',
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            gap: '4px'
+                                        }}
+                                        title="Enable quick action buttons directly on the preview table"
+                                    >
+                                        <span>{isTableInteractive ? '✓ Table Actions Active' : '✏️ Quick Edit Rows'}</span>
+                                    </button>
+
+                                    <button
+                                        onClick={() => handleResetClass(previewClass)}
+                                        style={{
+                                            padding: '5px 8px',
+                                            borderRadius: '8px',
+                                            border: '1px solid #e2e8f0',
+                                            background: '#ffffff',
+                                            color: '#64748b',
+                                            fontSize: '0.72rem',
+                                            fontWeight: 600,
+                                            cursor: 'pointer'
+                                        }}
+                                        title="Reset this class to original database data"
+                                    >
+                                        ↻ Reset
+                                    </button>
+                                </div>
+                            </div>
                         </div>
 
                         {/* Clean Borderless Scaled A4 Sheet Rendering */}
@@ -1286,19 +1575,60 @@ export default function ClassRosterPDFModal({
                                             </tr>
 
                                             {/* Student Rows */}
-                                            {sec.students.map((item, idx) => (
-                                                <tr key={`std-${item.student.id || idx}`}>
-                                                    <td style={{ padding: '5.5px 8px', fontSize: '0.85rem', fontWeight: 600, color: '#08213d', textAlign: 'center', border: '1px solid #7a94b5', height: '31.5px' }}>
-                                                        {String(item.displayIndex).padStart(2, '0')}.
-                                                    </td>
-                                                    <td style={{ padding: '5.5px 12px', fontSize: '0.85rem', fontWeight: 600, color: '#0f172a', border: '1px solid #7a94b5', height: '31.5px' }}>
-                                                        {item.student.full_name}
-                                                    </td>
-                                                    <td style={{ padding: '5.5px 12px', fontSize: '0.85rem', fontWeight: 500, color: '#334155', border: '1px solid #7a94b5', height: '31.5px' }}>
-                                                        {item.student.father_name || item.student.raw?.guardian_name || item.student.raw?.father_name || ''}
-                                                    </td>
-                                                </tr>
-                                            ))}
+                                            {sec.students.map((item, idx) => {
+                                                const isGirl = sec.type === 'girls';
+                                                return (
+                                                    <tr key={`std-${item.student.id || idx}`} style={{ position: 'relative' }}>
+                                                        <td style={{ padding: '5.5px 8px', fontSize: '0.85rem', fontWeight: 600, color: '#08213d', textAlign: 'center', border: '1px solid #7a94b5', height: '31.5px' }}>
+                                                            {String(item.displayIndex).padStart(2, '0')}.
+                                                        </td>
+                                                        <td style={{ padding: '5.5px 12px', fontSize: '0.85rem', fontWeight: 600, color: '#0f172a', border: '1px solid #7a94b5', height: '31.5px' }}>
+                                                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                                                                <span>{item.student.full_name}</span>
+                                                                {isTableInteractive && (
+                                                                    <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                                                                        <button
+                                                                            onClick={() => handleToggleGender(item.student.id, isGirl)}
+                                                                            style={{
+                                                                                padding: '2px 6px',
+                                                                                borderRadius: '4px',
+                                                                                border: 'none',
+                                                                                background: isGirl ? '#fce7f3' : '#dbeafe',
+                                                                                color: isGirl ? '#be185d' : '#1d4ed8',
+                                                                                fontSize: '0.65rem',
+                                                                                fontWeight: 700,
+                                                                                cursor: 'pointer'
+                                                                            }}
+                                                                            title="Switch Gender"
+                                                                        >
+                                                                            {isGirl ? '👧→👦' : '👦→👧'}
+                                                                        </button>
+                                                                        <button
+                                                                            onClick={() => handleExcludeStudent(item.student.id)}
+                                                                            style={{
+                                                                                padding: '2px 5px',
+                                                                                borderRadius: '4px',
+                                                                                border: 'none',
+                                                                                background: '#fee2e2',
+                                                                                color: '#b91c1c',
+                                                                                fontSize: '0.65rem',
+                                                                                fontWeight: 700,
+                                                                                cursor: 'pointer'
+                                                                            }}
+                                                                            title="Exclude/Remove student from roster"
+                                                                        >
+                                                                            ✕
+                                                                        </button>
+                                                                    </div>
+                                                                )}
+                                                            </div>
+                                                        </td>
+                                                        <td style={{ padding: '5.5px 12px', fontSize: '0.85rem', fontWeight: 500, color: '#334155', border: '1px solid #7a94b5', height: '31.5px' }}>
+                                                            {item.student.father_name || item.student.raw?.guardian_name || item.student.raw?.father_name || ''}
+                                                        </td>
+                                                    </tr>
+                                                );
+                                            })}
 
                                             {/* Blank Rows */}
                                             {Array.from({ length: sec.blankCount }).map((_, bIdx) => (
@@ -1315,15 +1645,16 @@ export default function ClassRosterPDFModal({
 
                         </div>
 
-                        {/* Student Gender Arranger Modal / Drawer */}
-                        {showStudentArranger && (
+                        {/* Student Manager & Gender Arranger Modal */}
+                        {showStudentManager && (
                             <div style={{
                                 position: 'fixed',
                                 top: 0,
                                 left: 0,
                                 right: 0,
                                 bottom: 0,
-                                background: 'rgba(0, 0, 0, 0.5)',
+                                background: 'rgba(15, 23, 42, 0.65)',
+                                backdropFilter: 'blur(4px)',
                                 zIndex: 100000,
                                 display: 'flex',
                                 alignItems: 'center',
@@ -1332,18 +1663,18 @@ export default function ClassRosterPDFModal({
                             }}>
                                 <div style={{
                                     background: '#ffffff',
-                                    borderRadius: '16px',
-                                    width: '600px',
+                                    borderRadius: '20px',
+                                    width: '680px',
                                     maxWidth: '95vw',
-                                    maxHeight: '85vh',
+                                    maxHeight: '90vh',
                                     display: 'flex',
                                     flexDirection: 'column',
-                                    boxShadow: '0 20px 40px rgba(0,0,0,0.25)',
+                                    boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.35)',
                                     overflow: 'hidden'
                                 }}>
                                     {/* Modal Header */}
                                     <div style={{
-                                        padding: '16px 20px',
+                                        padding: '16px 22px',
                                         background: '#08213d',
                                         color: '#ffffff',
                                         display: 'flex',
@@ -1351,133 +1682,600 @@ export default function ClassRosterPDFModal({
                                         alignItems: 'center'
                                     }}>
                                         <div>
-                                            <h3 style={{ margin: 0, fontSize: '1rem', fontWeight: 800 }}>
-                                                Arrange Students: {previewClass}
+                                            <h3 style={{ margin: 0, fontSize: '1.05rem', fontWeight: 900, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                                <span>👥</span> Manage Roster Students: <span style={{ color: '#60a5fa' }}>{previewClass}</span>
                                             </h3>
-                                            <p style={{ margin: '2px 0 0 0', fontSize: '0.72rem', color: '#93c5fd' }}>
-                                                Click any badge to toggle between Girl (👧) and Boy (👦).
+                                            <p style={{ margin: '3px 0 0 0', fontSize: '0.72rem', color: '#93c5fd' }}>
+                                                Add or remove students, switch between Girl 👧 and Boy 👦, or edit names for clean printing.
                                             </p>
                                         </div>
                                         <button
-                                            onClick={() => setShowStudentArranger(false)}
+                                            onClick={() => setShowStudentManager(false)}
                                             style={{
-                                                background: 'transparent',
+                                                background: 'rgba(255,255,255,0.1)',
                                                 border: 'none',
                                                 color: '#ffffff',
-                                                fontSize: '1.25rem',
-                                                cursor: 'pointer'
+                                                fontSize: '1rem',
+                                                width: '32px',
+                                                height: '32px',
+                                                borderRadius: '8px',
+                                                cursor: 'pointer',
+                                                display: 'flex',
+                                                alignItems: 'center',
+                                                justifyContent: 'center'
                                             }}
                                         >
                                             ✕
                                         </button>
                                     </div>
 
-                                    {/* Modal Toolbar */}
+                                    {/* Navigation Tabs */}
                                     <div style={{
-                                        padding: '12px 20px',
+                                        display: 'flex',
+                                        gap: '6px',
+                                        padding: '10px 20px',
                                         background: '#f8fafc',
                                         borderBottom: '1px solid #e2e8f0',
-                                        display: 'flex',
-                                        alignItems: 'center',
-                                        gap: '10px'
+                                        overflowX: 'auto'
                                     }}>
-                                        <input
-                                            type="text"
-                                            placeholder="Search student in this class..."
-                                            value={arrangerSearch}
-                                            onChange={e => setArrangerSearch(e.target.value)}
-                                            style={{
-                                                flex: 1,
-                                                padding: '7px 12px',
-                                                borderRadius: '8px',
-                                                border: '1px solid #cbd5e1',
-                                                fontSize: '0.8rem'
-                                            }}
-                                        />
-                                        <button
-                                            onClick={() => handleResetClassOverrides(previewClass)}
-                                            style={{
-                                                padding: '7px 12px',
-                                                borderRadius: '8px',
-                                                border: '1px solid #cbd5e1',
-                                                background: '#ffffff',
-                                                color: '#475569',
-                                                fontSize: '0.75rem',
-                                                fontWeight: 700,
-                                                cursor: 'pointer',
-                                                whiteSpace: 'nowrap'
-                                            }}
-                                        >
-                                            Reset to Auto
-                                        </button>
+                                        {[
+                                            { id: 'all', label: `All Active (${(classStudentsMap[previewClass]?.girls.length || 0) + (classStudentsMap[previewClass]?.boys.length || 0)})`, icon: 'view_list' },
+                                            { id: 'girls', label: `Girls 👧 (${classStudentsMap[previewClass]?.girls.length || 0})`, icon: 'female' },
+                                            { id: 'boys', label: `Boys 👦 (${classStudentsMap[previewClass]?.boys.length || 0})`, icon: 'male' },
+                                            { id: 'add', label: '➕ Add New Student', icon: 'person_add' },
+                                            { id: 'excluded', label: `Excluded (${excludedStudentIds.filter(id => allEffectiveStudents.find(s => s.id === id)?.grade === previewClass).length})`, icon: 'delete_outline' }
+                                        ].map(tab => {
+                                            const isActive = managerTab === tab.id;
+                                            return (
+                                                <button
+                                                    key={tab.id}
+                                                    onClick={() => setManagerTab(tab.id as any)}
+                                                    style={{
+                                                        padding: '7px 12px',
+                                                        borderRadius: '8px',
+                                                        border: 'none',
+                                                        background: isActive ? '#08213d' : '#e2e8f0',
+                                                        color: isActive ? '#ffffff' : '#334155',
+                                                        fontWeight: 700,
+                                                        fontSize: '0.75rem',
+                                                        cursor: 'pointer',
+                                                        whiteSpace: 'nowrap',
+                                                        transition: 'all 0.15s ease'
+                                                    }}
+                                                >
+                                                    {tab.label}
+                                                </button>
+                                            );
+                                        })}
                                     </div>
 
-                                    {/* Student List */}
-                                    <div style={{
-                                        padding: '12px 20px',
-                                        overflowY: 'auto',
-                                        flex: 1,
-                                        display: 'flex',
-                                        flexDirection: 'column',
-                                        gap: '6px'
-                                    }}>
-                                        {students
-                                            .filter(s => s.grade === previewClass)
-                                            .filter(s => !arrangerSearch || (s.full_name || '').toLowerCase().includes(arrangerSearch.toLowerCase()) || (s.father_name || '').toLowerCase().includes(arrangerSearch.toLowerCase()))
-                                            .map(s => {
-                                                const isGirl = isFemaleStudent(s, genderOverrides);
-                                                const isOverridden = Boolean(genderOverrides[s.id]);
-                                                return (
-                                                    <div
-                                                        key={s.id}
-                                                        style={{
-                                                            display: 'flex',
-                                                            alignItems: 'center',
-                                                            justifyContent: 'space-between',
-                                                            padding: '8px 12px',
-                                                            borderRadius: '8px',
-                                                            background: isGirl ? '#fdf2f8' : '#eff6ff',
-                                                            border: isGirl ? '1px solid #fbcfe8' : '1px solid #bfdbfe'
-                                                        }}
-                                                    >
+                                    {/* Search / Filter Bar (when not in Add tab) */}
+                                    {managerTab !== 'add' && (
+                                        <div style={{
+                                            padding: '10px 20px',
+                                            background: '#ffffff',
+                                            borderBottom: '1px solid #f1f5f9',
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            gap: '10px'
+                                        }}>
+                                            <input
+                                                type="text"
+                                                placeholder="Search student by name, father's name or ID..."
+                                                value={managerSearch}
+                                                onChange={e => setManagerSearch(e.target.value)}
+                                                style={{
+                                                    flex: 1,
+                                                    padding: '8px 12px',
+                                                    borderRadius: '8px',
+                                                    border: '1px solid #cbd5e1',
+                                                    fontSize: '0.8rem',
+                                                    outline: 'none'
+                                                }}
+                                            />
+                                            {managerSearch && (
+                                                <button
+                                                    onClick={() => setManagerSearch('')}
+                                                    style={{
+                                                        padding: '6px 10px',
+                                                        borderRadius: '6px',
+                                                        border: '1px solid #cbd5e1',
+                                                        background: '#f8fafc',
+                                                        fontSize: '0.7rem',
+                                                        cursor: 'pointer'
+                                                    }}
+                                                >
+                                                    Clear
+                                                </button>
+                                            )}
+                                        </div>
+                                    )}
+
+                                    {/* Tab 1: ADD NEW STUDENT FORM */}
+                                    {managerTab === 'add' && (
+                                        <div style={{ padding: '22px 24px', overflowY: 'auto', flex: 1, background: '#ffffff' }}>
+                                            <div style={{
+                                                background: '#f8fafc',
+                                                border: '1px solid #e2e8f0',
+                                                borderRadius: '14px',
+                                                padding: '20px'
+                                            }}>
+                                                <h4 style={{ margin: '0 0 14px 0', fontSize: '0.92rem', fontWeight: 800, color: '#0f172a', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                                    <span>➕</span> Add New Student to {previewClass} Roster
+                                                </h4>
+                                                
+                                                <form onSubmit={handleAddNewStudent} style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+                                                    <div>
+                                                        <label style={{ fontSize: '0.75rem', fontWeight: 700, color: '#334155', display: 'block', marginBottom: '4px' }}>
+                                                            Student Full Name <span style={{ color: '#dc2626' }}>*</span>
+                                                        </label>
+                                                        <input
+                                                            type="text"
+                                                            placeholder="e.g. Fatima Zahra / Muhammad Ali"
+                                                            value={newStudentForm.full_name}
+                                                            onChange={e => setNewStudentForm(prev => ({ ...prev, full_name: e.target.value }))}
+                                                            required
+                                                            style={{
+                                                                width: '100%',
+                                                                padding: '9px 12px',
+                                                                borderRadius: '8px',
+                                                                border: '1px solid #cbd5e1',
+                                                                fontSize: '0.85rem',
+                                                                boxSizing: 'border-box'
+                                                            }}
+                                                        />
+                                                    </div>
+
+                                                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
                                                         <div>
-                                                            <div style={{ fontSize: '0.82rem', fontWeight: 700, color: '#0f172a' }}>
-                                                                {s.full_name}
-                                                            </div>
-                                                            <div style={{ fontSize: '0.7rem', color: '#64748b' }}>
-                                                                S/O, D/O: {s.father_name || s.raw?.father_name || 'N/A'} {s.student_id ? `• ID: ${s.student_id}` : ''}
-                                                            </div>
+                                                            <label style={{ fontSize: '0.75rem', fontWeight: 700, color: '#334155', display: 'block', marginBottom: '4px' }}>
+                                                                Father / Guardian Name
+                                                            </label>
+                                                            <input
+                                                                type="text"
+                                                                placeholder="e.g. Muhammad Zahid"
+                                                                value={newStudentForm.father_name}
+                                                                onChange={e => setNewStudentForm(prev => ({ ...prev, father_name: e.target.value }))}
+                                                                style={{
+                                                                    width: '100%',
+                                                                    padding: '9px 12px',
+                                                                    borderRadius: '8px',
+                                                                    border: '1px solid #cbd5e1',
+                                                                    fontSize: '0.85rem',
+                                                                    boxSizing: 'border-box'
+                                                                }}
+                                                            />
                                                         </div>
 
-                                                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                                            {isOverridden && (
-                                                                <span style={{ fontSize: '0.65rem', color: '#f59e0b', fontWeight: 700, background: '#fef3c7', padding: '2px 5px', borderRadius: '4px' }}>
-                                                                    Custom
-                                                                </span>
-                                                            )}
-                                                            <button
-                                                                onClick={() => handleToggleGender(s.id, isGirl)}
+                                                        <div>
+                                                            <label style={{ fontSize: '0.75rem', fontWeight: 700, color: '#334155', display: 'block', marginBottom: '4px' }}>
+                                                                Student ID / Roll No (Optional)
+                                                            </label>
+                                                            <input
+                                                                type="text"
+                                                                placeholder="e.g. STD-1045"
+                                                                value={newStudentForm.student_id}
+                                                                onChange={e => setNewStudentForm(prev => ({ ...prev, student_id: e.target.value }))}
                                                                 style={{
-                                                                    padding: '5px 12px',
-                                                                    borderRadius: '20px',
-                                                                    border: 'none',
-                                                                    background: isGirl ? '#db2777' : '#2563eb',
-                                                                    color: '#ffffff',
-                                                                    fontWeight: 800,
-                                                                    fontSize: '0.75rem',
-                                                                    cursor: 'pointer',
-                                                                    display: 'flex',
-                                                                    alignItems: 'center',
-                                                                    gap: '4px'
+                                                                    width: '100%',
+                                                                    padding: '9px 12px',
+                                                                    borderRadius: '8px',
+                                                                    border: '1px solid #cbd5e1',
+                                                                    fontSize: '0.85rem',
+                                                                    boxSizing: 'border-box'
                                                                 }}
-                                                            >
-                                                                {isGirl ? '👧 Girl' : '👦 Boy'}
-                                                            </button>
+                                                            />
                                                         </div>
                                                     </div>
-                                                );
-                                            })}
-                                    </div>
+
+                                                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+                                                        <div>
+                                                            <label style={{ fontSize: '0.75rem', fontWeight: 700, color: '#334155', display: 'block', marginBottom: '4px' }}>
+                                                                Assigned Class / Grade
+                                                            </label>
+                                                            <select
+                                                                value={newStudentForm.grade}
+                                                                onChange={e => setNewStudentForm(prev => ({ ...prev, grade: e.target.value }))}
+                                                                style={{
+                                                                    width: '100%',
+                                                                    padding: '9px 12px',
+                                                                    borderRadius: '8px',
+                                                                    border: '1px solid #cbd5e1',
+                                                                    fontSize: '0.85rem',
+                                                                    background: '#ffffff',
+                                                                    boxSizing: 'border-box'
+                                                                }}
+                                                            >
+                                                                {classes.map(c => (
+                                                                    <option key={c} value={c}>{c}</option>
+                                                                ))}
+                                                            </select>
+                                                        </div>
+
+                                                        <div>
+                                                            <label style={{ fontSize: '0.75rem', fontWeight: 700, color: '#334155', display: 'block', marginBottom: '4px' }}>
+                                                                Student Gender
+                                                            </label>
+                                                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px' }}>
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => setNewStudentForm(prev => ({ ...prev, gender: 'girl' }))}
+                                                                    style={{
+                                                                        padding: '9px 6px',
+                                                                        borderRadius: '8px',
+                                                                        border: newStudentForm.gender === 'girl' ? '2px solid #db2777' : '1px solid #cbd5e1',
+                                                                        background: newStudentForm.gender === 'girl' ? '#fdf2f8' : '#ffffff',
+                                                                        color: newStudentForm.gender === 'girl' ? '#be185d' : '#475569',
+                                                                        fontWeight: 800,
+                                                                        fontSize: '0.8rem',
+                                                                        cursor: 'pointer'
+                                                                    }}
+                                                                >
+                                                                    👧 Girl
+                                                                </button>
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => setNewStudentForm(prev => ({ ...prev, gender: 'boy' }))}
+                                                                    style={{
+                                                                        padding: '9px 6px',
+                                                                        borderRadius: '8px',
+                                                                        border: newStudentForm.gender === 'boy' ? '2px solid #2563eb' : '1px solid #cbd5e1',
+                                                                        background: newStudentForm.gender === 'boy' ? '#eff6ff' : '#ffffff',
+                                                                        color: newStudentForm.gender === 'boy' ? '#1d4ed8' : '#475569',
+                                                                        fontWeight: 800,
+                                                                        fontSize: '0.8rem',
+                                                                        cursor: 'pointer'
+                                                                    }}
+                                                                >
+                                                                    👦 Boy
+                                                                </button>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+
+                                                    <div style={{ display: 'flex', gap: '10px', marginTop: '6px' }}>
+                                                        <button
+                                                            type="submit"
+                                                            style={{
+                                                                flex: 1,
+                                                                padding: '11px',
+                                                                borderRadius: '10px',
+                                                                border: 'none',
+                                                                background: '#2563eb',
+                                                                color: '#ffffff',
+                                                                fontWeight: 800,
+                                                                fontSize: '0.85rem',
+                                                                cursor: 'pointer',
+                                                                boxShadow: '0 4px 12px rgba(37, 99, 235, 0.3)'
+                                                            }}
+                                                        >
+                                                            ✓ Add Student to Roster
+                                                        </button>
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => setManagerTab('all')}
+                                                            style={{
+                                                                padding: '11px 16px',
+                                                                borderRadius: '10px',
+                                                                border: '1px solid #cbd5e1',
+                                                                background: '#ffffff',
+                                                                color: '#475569',
+                                                                fontWeight: 700,
+                                                                fontSize: '0.85rem',
+                                                                cursor: 'pointer'
+                                                            }}
+                                                        >
+                                                            Cancel
+                                                        </button>
+                                                    </div>
+                                                </form>
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    {/* Tab 2: EXCLUDED STUDENTS */}
+                                    {managerTab === 'excluded' && (
+                                        <div style={{ padding: '16px 20px', overflowY: 'auto', flex: 1, display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                                            {(() => {
+                                                const excludedInClass = allEffectiveStudents
+                                                    .filter(s => s.grade === previewClass && excludedStudentIds.includes(s.id))
+                                                    .filter(s => !managerSearch || (s.full_name || '').toLowerCase().includes(managerSearch.toLowerCase()) || (s.father_name || '').toLowerCase().includes(managerSearch.toLowerCase()));
+
+                                                if (excludedInClass.length === 0) {
+                                                    return (
+                                                        <div style={{ padding: '40px 20px', textAlign: 'center', color: '#64748b' }}>
+                                                            <div style={{ fontSize: '2rem', marginBottom: '8px' }}>✓</div>
+                                                            <div style={{ fontWeight: 700, fontSize: '0.9rem', color: '#0f172a' }}>No Excluded Students</div>
+                                                            <div style={{ fontSize: '0.75rem', marginTop: '4px' }}>All students in {previewClass} are currently included in the roster.</div>
+                                                        </div>
+                                                    );
+                                                }
+
+                                                return excludedInClass.map(s => {
+                                                    const isGirl = isFemaleStudent(s, genderOverrides);
+                                                    return (
+                                                        <div
+                                                            key={s.id}
+                                                            style={{
+                                                                display: 'flex',
+                                                                alignItems: 'center',
+                                                                justifyContent: 'space-between',
+                                                                padding: '10px 14px',
+                                                                borderRadius: '10px',
+                                                                background: '#fef2f2',
+                                                                border: '1px solid #fecaca'
+                                                            }}
+                                                        >
+                                                            <div>
+                                                                <div style={{ fontSize: '0.85rem', fontWeight: 800, color: '#991b1b', textDecoration: 'line-through' }}>
+                                                                    {s.full_name}
+                                                                </div>
+                                                                <div style={{ fontSize: '0.7rem', color: '#7f1d1d' }}>
+                                                                    Father: {s.father_name || s.raw?.guardian_name || s.raw?.father_name || 'N/A'} {s.student_id ? `• ID: ${s.student_id}` : ''}
+                                                                </div>
+                                                            </div>
+
+                                                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                                                <span style={{ fontSize: '0.7rem', padding: '3px 8px', borderRadius: '6px', background: isGirl ? '#fce7f3' : '#dbeafe', color: isGirl ? '#be185d' : '#1d4ed8', fontWeight: 700 }}>
+                                                                    {isGirl ? '👧 Girl' : '👦 Boy'}
+                                                                </span>
+                                                                <button
+                                                                    onClick={() => handleRestoreStudent(s.id)}
+                                                                    style={{
+                                                                        padding: '6px 12px',
+                                                                        borderRadius: '8px',
+                                                                        border: 'none',
+                                                                        background: '#16a34a',
+                                                                        color: '#ffffff',
+                                                                        fontWeight: 800,
+                                                                        fontSize: '0.75rem',
+                                                                        cursor: 'pointer',
+                                                                        display: 'flex',
+                                                                        alignItems: 'center',
+                                                                        gap: '4px'
+                                                                    }}
+                                                                >
+                                                                    ↩ Restore to Roster
+                                                                </button>
+                                                            </div>
+                                                        </div>
+                                                    );
+                                                });
+                                            })()}
+                                        </div>
+                                    )}
+
+                                    {/* Tab 3: ACTIVE STUDENTS LIST (All / Girls / Boys) */}
+                                    {managerTab !== 'add' && managerTab !== 'excluded' && (
+                                        <div style={{
+                                            padding: '16px 20px',
+                                            overflowY: 'auto',
+                                            flex: 1,
+                                            display: 'flex',
+                                            flexDirection: 'column',
+                                            gap: '8px'
+                                        }}>
+                                            {(() => {
+                                                let classStudents = activeRosterStudents.filter(s => s.grade === previewClass);
+                                                
+                                                if (managerTab === 'girls') {
+                                                    classStudents = classStudents.filter(s => isFemaleStudent(s, genderOverrides));
+                                                } else if (managerTab === 'boys') {
+                                                    classStudents = classStudents.filter(s => !isFemaleStudent(s, genderOverrides));
+                                                }
+
+                                                if (managerSearch) {
+                                                    const q = managerSearch.toLowerCase();
+                                                    classStudents = classStudents.filter(s => 
+                                                        (s.full_name || '').toLowerCase().includes(q) ||
+                                                        (s.father_name || '').toLowerCase().includes(q) ||
+                                                        (s.student_id || '').toLowerCase().includes(q)
+                                                    );
+                                                }
+
+                                                if (classStudents.length === 0) {
+                                                    return (
+                                                        <div style={{ padding: '40px 20px', textAlign: 'center', color: '#64748b' }}>
+                                                            <div style={{ fontWeight: 700, fontSize: '0.85rem' }}>No students found matching your criteria.</div>
+                                                            <button
+                                                                onClick={() => {
+                                                                    setManagerTab('add');
+                                                                    setNewStudentForm(prev => ({ ...prev, grade: previewClass }));
+                                                                }}
+                                                                style={{
+                                                                    marginTop: '10px',
+                                                                    padding: '7px 14px',
+                                                                    borderRadius: '8px',
+                                                                    border: 'none',
+                                                                    background: '#2563eb',
+                                                                    color: '#ffffff',
+                                                                    fontSize: '0.75rem',
+                                                                    fontWeight: 700,
+                                                                    cursor: 'pointer'
+                                                                }}
+                                                            >
+                                                                ➕ Add a Student Now
+                                                            </button>
+                                                        </div>
+                                                    );
+                                                }
+
+                                                return classStudents.map((s, idx) => {
+                                                    const isGirl = isFemaleStudent(s, genderOverrides);
+                                                    const isOverridden = Boolean(genderOverrides[s.id]);
+                                                    const isCustomAdded = customAddedStudents.some(c => c.id === s.id);
+                                                    const isEditing = editingStudentId === s.id;
+
+                                                    return (
+                                                        <div
+                                                            key={s.id}
+                                                            style={{
+                                                                display: 'flex',
+                                                                alignItems: 'center',
+                                                                justifyContent: 'space-between',
+                                                                padding: '10px 14px',
+                                                                borderRadius: '10px',
+                                                                background: isGirl ? '#fdf2f8' : '#eff6ff',
+                                                                border: isGirl ? '1px solid #fbcfe8' : '1px solid #bfdbfe',
+                                                                gap: '12px'
+                                                            }}
+                                                        >
+                                                            {/* Left: Info or Inline Edit */}
+                                                            <div style={{ flex: 1 }}>
+                                                                {isEditing ? (
+                                                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                                                                        <input
+                                                                            type="text"
+                                                                            value={editingForm.full_name}
+                                                                            onChange={e => setEditingForm(prev => ({ ...prev, full_name: e.target.value }))}
+                                                                            placeholder="Student Name"
+                                                                            style={{
+                                                                                padding: '5px 8px',
+                                                                                borderRadius: '6px',
+                                                                                border: '1px solid #cbd5e1',
+                                                                                fontSize: '0.8rem',
+                                                                                fontWeight: 700
+                                                                            }}
+                                                                        />
+                                                                        <input
+                                                                            type="text"
+                                                                            value={editingForm.father_name}
+                                                                            onChange={e => setEditingForm(prev => ({ ...prev, father_name: e.target.value }))}
+                                                                            placeholder="Father's Name"
+                                                                            style={{
+                                                                                padding: '5px 8px',
+                                                                                borderRadius: '6px',
+                                                                                border: '1px solid #cbd5e1',
+                                                                                fontSize: '0.75rem'
+                                                                            }}
+                                                                        />
+                                                                        <div style={{ display: 'flex', gap: '6px', marginTop: '2px' }}>
+                                                                            <button
+                                                                                onClick={() => handleSaveEdit(s.id)}
+                                                                                style={{
+                                                                                    padding: '4px 10px',
+                                                                                    borderRadius: '6px',
+                                                                                    border: 'none',
+                                                                                    background: '#16a34a',
+                                                                                    color: '#ffffff',
+                                                                                    fontSize: '0.7rem',
+                                                                                    fontWeight: 800,
+                                                                                    cursor: 'pointer'
+                                                                                }}
+                                                                            >
+                                                                                Save
+                                                                            </button>
+                                                                            <button
+                                                                                onClick={() => setEditingStudentId(null)}
+                                                                                style={{
+                                                                                    padding: '4px 8px',
+                                                                                    borderRadius: '6px',
+                                                                                    border: '1px solid #cbd5e1',
+                                                                                    background: '#ffffff',
+                                                                                    fontSize: '0.7rem',
+                                                                                    cursor: 'pointer'
+                                                                                }}
+                                                                            >
+                                                                                Cancel
+                                                                            </button>
+                                                                        </div>
+                                                                    </div>
+                                                                ) : (
+                                                                    <div>
+                                                                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                                                            <span style={{ fontSize: '0.75rem', fontWeight: 800, color: '#64748b' }}>
+                                                                                #{idx + 1}
+                                                                            </span>
+                                                                            <span style={{ fontSize: '0.85rem', fontWeight: 800, color: '#0f172a' }}>
+                                                                                {s.full_name}
+                                                                            </span>
+                                                                            {isCustomAdded && (
+                                                                                <span style={{ fontSize: '0.62rem', background: '#dcfce7', color: '#15803d', padding: '1px 5px', borderRadius: '4px', fontWeight: 800 }}>
+                                                                                    + Added
+                                                                                </span>
+                                                                            )}
+                                                                            {isOverridden && (
+                                                                                <span style={{ fontSize: '0.62rem', background: '#fef3c7', color: '#b45309', padding: '1px 5px', borderRadius: '4px', fontWeight: 800 }}>
+                                                                                    ⚙ Switched
+                                                                                </span>
+                                                                            )}
+                                                                        </div>
+                                                                        <div style={{ fontSize: '0.72rem', color: '#475569', marginTop: '2px' }}>
+                                                                            Father: <span style={{ fontWeight: 600 }}>{s.father_name || s.raw?.guardian_name || s.raw?.father_name || '—'}</span>
+                                                                            {s.student_id ? ` • ID: ${s.student_id}` : ''}
+                                                                        </div>
+                                                                    </div>
+                                                                )}
+                                                            </div>
+
+                                                            {/* Right: Actions */}
+                                                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                                                {/* Gender Toggle Button */}
+                                                                <button
+                                                                    onClick={() => handleToggleGender(s.id, isGirl)}
+                                                                    style={{
+                                                                        padding: '6px 12px',
+                                                                        borderRadius: '20px',
+                                                                        border: 'none',
+                                                                        background: isGirl ? '#db2777' : '#2563eb',
+                                                                        color: '#ffffff',
+                                                                        fontWeight: 800,
+                                                                        fontSize: '0.75rem',
+                                                                        cursor: 'pointer',
+                                                                        display: 'flex',
+                                                                        alignItems: 'center',
+                                                                        gap: '4px',
+                                                                        boxShadow: isGirl ? '0 2px 6px rgba(219,39,119,0.3)' : '0 2px 6px rgba(37,99,235,0.3)'
+                                                                    }}
+                                                                    title={`Click to switch to ${isGirl ? 'Boy' : 'Girl'}`}
+                                                                >
+                                                                    {isGirl ? '👧 Girl' : '👦 Boy'}
+                                                                </button>
+
+                                                                {/* Edit Name Button */}
+                                                                {!isEditing && (
+                                                                    <button
+                                                                        onClick={() => handleStartEdit(s)}
+                                                                        style={{
+                                                                            padding: '6px 8px',
+                                                                            borderRadius: '6px',
+                                                                            border: '1px solid #cbd5e1',
+                                                                            background: '#ffffff',
+                                                                            color: '#334155',
+                                                                            fontSize: '0.7rem',
+                                                                            fontWeight: 700,
+                                                                            cursor: 'pointer'
+                                                                        }}
+                                                                        title="Edit student or father name"
+                                                                    >
+                                                                        ✏️
+                                                                    </button>
+                                                                )}
+
+                                                                {/* Exclude / Remove Button */}
+                                                                <button
+                                                                    onClick={() => handleExcludeStudent(s.id)}
+                                                                    style={{
+                                                                        padding: '6px 8px',
+                                                                        borderRadius: '6px',
+                                                                        border: '1px solid #fecaca',
+                                                                        background: '#fef2f2',
+                                                                        color: '#dc2626',
+                                                                        fontSize: '0.7rem',
+                                                                        fontWeight: 800,
+                                                                        cursor: 'pointer'
+                                                                    }}
+                                                                    title="Remove / Exclude from Roster"
+                                                                >
+                                                                    🗑️
+                                                                </button>
+                                                            </div>
+                                                        </div>
+                                                    );
+                                                });
+                                            })()}
+                                        </div>
+                                    )}
 
                                     {/* Modal Footer */}
                                     <div style={{
@@ -1485,22 +2283,40 @@ export default function ClassRosterPDFModal({
                                         background: '#f8fafc',
                                         borderTop: '1px solid #e2e8f0',
                                         display: 'flex',
-                                        justifyContent: 'flex-end'
+                                        justifyContent: 'space-between',
+                                        alignItems: 'center'
                                     }}>
                                         <button
-                                            onClick={() => setShowStudentArranger(false)}
+                                            onClick={() => handleResetClass(previewClass)}
                                             style={{
-                                                padding: '8px 18px',
+                                                padding: '7px 12px',
                                                 borderRadius: '8px',
+                                                border: '1px solid #cbd5e1',
+                                                background: '#ffffff',
+                                                color: '#64748b',
+                                                fontSize: '0.72rem',
+                                                fontWeight: 700,
+                                                cursor: 'pointer'
+                                            }}
+                                        >
+                                            ↻ Reset Class Defaults
+                                        </button>
+
+                                        <button
+                                            onClick={() => setShowStudentManager(false)}
+                                            style={{
+                                                padding: '8px 22px',
+                                                borderRadius: '10px',
                                                 border: 'none',
                                                 background: '#08213d',
                                                 color: '#ffffff',
                                                 fontSize: '0.8rem',
                                                 fontWeight: 800,
-                                                cursor: 'pointer'
+                                                cursor: 'pointer',
+                                                boxShadow: '0 2px 8px rgba(8,33,61,0.25)'
                                             }}
                                         >
-                                            Done
+                                            Done & Preview Roster
                                         </button>
                                     </div>
                                 </div>
